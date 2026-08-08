@@ -1,0 +1,29 @@
+[package]
+name = "amber-store-core"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+description = "Content-addressable store for filesystem trees — Rust port of github.com/jobs-build/amber-store-core"
+repository = "https://github.com/amber-store/core-rs"
+keywords = ["content-addressable", "cas", "merkle", "cdc", "storage"]
+categories = ["filesystem", "data-structures"]
+
+[dependencies]
+blake3 = "1"
+crc32c = "0.6"
+zstd = "0.13"
+redb = "2"
+thiserror = "2"
+memmap2 = "0.9"
+libc = "0.2"
+xattr = "1"
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+hex = "0.4"
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+lto = "thin"
