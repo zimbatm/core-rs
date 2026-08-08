@@ -1,0 +1,931 @@
+//! Persists Amber-Store CAS objects in log-structured, append-only segment
+//! (pack) files. The store directory contains only segment files: sealed
+//! segments are immutable, mmap'd whole, and self-indexed by a footer (fanout
+//! index on the last key byte + binary fuse filter + fixed trailer); the
+//! single active segment is recovered by a tail-scan. There is no global
+//! index. All format integers are big-endian. Record framing lives in the
+//! [`crate::amberpack`] module.
+//!
+//! This is a semantic port of Go's `packstore` package; segment files are
+//! interchangeable between the two implementations (see PORTING.md — zstd
+//! frames differ, so segment *files* are not byte-identical run-to-run, but
+//! each side reads the other's).
+
+mod footer;
+mod missing;
+mod parallel;
+mod recover;
+mod verify;
+
+pub use parallel::{DEFAULT_BATCH_SIZE, WriteOpts, WriteStats};
+
+use std::collections::{HashMap, HashSet};
+use std::fs::{self, File, OpenOptions};
+use std::io;
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::FileExt;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
+
+use crate::amberpack::{self, REC_HEADER_SIZE, decode_payload, encode_record};
+use crate::key::Key;
+
+use footer::SealedSegment;
+use recover::{ActiveLoc, scan_active};
+
+/// First byte of the footer (Go: `tagSeal`).
+pub(crate) const TAG_SEAL: u8 = 0xF0;
+
+/// The 8-byte active/sealed segment file header (Go: `magicHeader`).
+pub(crate) const MAGIC_HEADER: [u8; 8] = *b"AMBERSG\x01";
+
+/// The 8-byte magic at the very end of a sealed segment (Go: `magicTrailer`).
+pub(crate) const MAGIC_TRAILER: [u8; 8] = *b"AMBERSGF";
+
+/// The default rotation threshold: the active segment is sealed once it
+/// reaches this many bytes (Go: `DefaultSegmentSize`).
+pub const DEFAULT_SEGMENT_SIZE: u64 = 256 << 20; // 256 MiB
+
+const SEALED_SUFFIX: &str = ".seg";
+const ACTIVE_SUFFIX: &str = ".seg.active";
+
+/// One CAS object: its key and its serialized bytes (Go: `packstore.Object`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Object {
+    /// The object's 32-byte lookup key.
+    pub key: Key,
+    /// The object's serialized bytes.
+    pub data: Vec<u8>,
+}
+
+impl From<crate::fstree::Object> for Object {
+    fn from(o: crate::fstree::Object) -> Object {
+        Object {
+            key: o.key,
+            data: o.bytes,
+        }
+    }
+}
+
+/// Errors from the packstore, mirroring the Go package's `errors.Is`
+/// sentinels (`ErrNotFound`, `ErrClosed`, `ErrCorrupt`, `ErrVerify`). Match
+/// classes with the `is_*` helpers where Go code would use `errors.Is`; they
+/// see through [`Error::Context`] wrapping exactly like Go's `%w` chains.
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    /// The key is not present in the store (Go: `ErrNotFound`).
+    #[error("packstore: object not found")]
+    NotFound,
+    /// The store has been closed (Go: `ErrClosed`).
+    #[error("packstore: store closed")]
+    Closed,
+    /// Structural corruption: bad record framing, bad footer, scrub findings
+    /// (Go: `ErrCorrupt`, which aliases `amberpack.ErrCorrupt` — `msg` holds
+    /// the complete diagnostic text, including that prefix where Go's
+    /// wrapping produces it). `verify` marks scrub findings that Go wraps in
+    /// *both* `ErrCorrupt` and `ErrVerify`.
+    #[error("{msg}")]
+    Corrupt {
+        /// The complete diagnostic message.
+        msg: String,
+        /// Whether this corruption is also an object-verification failure.
+        verify: bool,
+    },
+    /// An object's key does not match its payload (Go: `ErrVerify`, from
+    /// `WriteParallel` with `verify` enabled). `msg` is the complete
+    /// diagnostic text.
+    #[error("{0}")]
+    Verify(String),
+    /// The write path was poisoned by an earlier fsync failure (Go: the
+    /// sticky `packstore: write path failed: %w` error).
+    #[error("packstore: write path failed: {0}")]
+    Failed(String),
+    /// [`Store::verify`] was canceled by its cancellation callback (Go:
+    /// `ctx.Err()` from the caller's context).
+    #[error("packstore: verify canceled")]
+    Canceled,
+    /// A record-codec error surfaced unchanged (Go returns `amberpack` errors
+    /// unwrapped; in practice the encode-side size limit).
+    #[error(transparent)]
+    Pack(amberpack::Error),
+    /// An I/O error from the underlying files.
+    #[error(transparent)]
+    Io(#[from] io::Error),
+    /// A diagnostic prefix wrapped around another error, preserving its
+    /// classification (Go: `fmt.Errorf("...: %w", err)`).
+    #[error("{msg}: {source}")]
+    Context {
+        /// The prefix text.
+        msg: String,
+        /// The wrapped error.
+        source: Box<Error>,
+    },
+    /// An error the iterator handed to [`Store::write_batch`] /
+    /// [`Store::write_parallel`] yielded, returned verbatim like Go returns
+    /// the sequence's error.
+    #[error(transparent)]
+    Source(Box<dyn std::error::Error + Send + Sync>),
+    /// Any other store-level failure (lock conflicts, mmap failures, filter
+    /// construction).
+    #[error("{0}")]
+    Other(String),
+}
+
+impl Error {
+    /// Go's `errors.Is(err, ErrNotFound)`.
+    pub fn is_not_found(&self) -> bool {
+        match self {
+            Error::NotFound => true,
+            Error::Context { source, .. } => source.is_not_found(),
+            _ => false,
+        }
+    }
+
+    /// Go's `errors.Is(err, ErrClosed)`.
+    pub fn is_closed(&self) -> bool {
+        match self {
+            Error::Closed => true,
+            Error::Context { source, .. } => source.is_closed(),
+            _ => false,
+        }
+    }
+
+    /// Go's `errors.Is(err, ErrCorrupt)`.
+    pub fn is_corrupt(&self) -> bool {
+        match self {
+            Error::Corrupt { .. } => true,
+            Error::Pack(e) => e.is_corrupt(),
+            Error::Context { source, .. } => source.is_corrupt(),
+            _ => false,
+        }
+    }
+
+    /// Go's `errors.Is(err, ErrVerify)`.
+    pub fn is_verify(&self) -> bool {
+        match self {
+            Error::Verify(_) => true,
+            Error::Corrupt { verify, .. } => *verify,
+            Error::Context { source, .. } => source.is_verify(),
+            _ => false,
+        }
+    }
+}
+
+/// Builds a corruption error whose text matches Go's
+/// `fmt.Errorf("%w: ...", ErrCorrupt)` (the sentinel is
+/// `amberpack.ErrCorrupt`, so the prefix is amberpack's).
+pub(crate) fn corrupt(detail: impl std::fmt::Display) -> Error {
+    Error::Corrupt {
+        msg: format!("amberpack: corrupt pack data: {detail}"),
+        verify: false,
+    }
+}
+
+/// Store configuration (Go: the `WithSegmentSize` / `WithSync` options).
+#[derive(Debug, Clone, Copy)]
+pub struct Options {
+    segment_size: u64,
+    sync: bool,
+}
+
+impl Default for Options {
+    fn default() -> Options {
+        Options {
+            segment_size: DEFAULT_SEGMENT_SIZE,
+            sync: true,
+        }
+    }
+}
+
+impl Options {
+    /// Returns the default configuration.
+    pub fn new() -> Options {
+        Options::default()
+    }
+
+    /// Sets the rotation threshold in bytes. A single oversized record may
+    /// push one segment past it (Go: `WithSegmentSize`).
+    pub fn segment_size(mut self, n: u64) -> Options {
+        self.segment_size = n;
+        self
+    }
+
+    /// Controls whether writes are fsynced for crash durability. Default is
+    /// true; disabling it speeds bulk loads and tests (Go: `WithSync`).
+    pub fn sync(mut self, b: bool) -> Options {
+        self.sync = b;
+        self
+    }
+}
+
+/// The single append-only segment accepting writes (Go: `activeSegment`).
+/// `index` is written under the append lock and read by lookups under the
+/// shared lock; the current size lives with the writer in [`ActiveWriter`].
+struct ActiveSegment {
+    id: u64,
+    path: PathBuf,
+    f: File,
+    index: RwLock<HashMap<Key, ActiveLoc>>,
+}
+
+/// The write path's view of the active segment. Only the append lock holder
+/// touches it (Go: `activeSegment.size`, "accessed only under appendMu").
+struct ActiveWriter {
+    seg: Arc<ActiveSegment>,
+    size: u64,
+}
+
+/// Write-path state, serialized by the append lock (Go: fields guarded by
+/// `appendMu`, plus the directory handle that holds the flock).
+struct AppendState {
+    /// Holds the directory flock and serves directory fsyncs; dropped (and
+    /// the lock released) on close.
+    dir_f: Option<File>,
+    active: Option<ActiveWriter>,
+    next_id: u64,
+}
+
+/// Reader-visible state (Go: fields guarded by `mu`).
+struct Shared {
+    sealed: Vec<Arc<SealedSegment>>,    // ascending id; newest last
+    active: Option<Arc<ActiveSegment>>, // None until the first write of a session
+    closed: bool,
+    failed: Option<String>, // sticky write-path failure detail
+}
+
+/// An on-disk content-addressable store over segment files. It is safe for
+/// concurrent use. Lock ordering: the append lock before the shared lock,
+/// never the reverse. The append lock serializes the write path (append,
+/// fsync, seal, close); the shared lock guards sealed/active/closed for
+/// readers (Go: `Store`).
+pub struct Store {
+    dir: PathBuf,
+    cfg: Options,
+    append: Mutex<AppendState>,
+    shared: RwLock<Shared>,
+}
+
+impl std::fmt::Debug for Store {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Store")
+            .field("dir", &self.dir)
+            .finish_non_exhaustive()
+    }
+}
+
+fn unpoison<T>(r: Result<T, PoisonError<T>>) -> T {
+    r.unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Reads the big-endian u32 at `off` in `b`.
+pub(crate) fn be_u32(b: &[u8], off: usize) -> u32 {
+    u32::from_be_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]])
+}
+
+/// Parses a segment file's numeric id from its name (Go: `parseSegmentID`):
+/// exactly 16 hex digits followed by `suffix`.
+fn parse_segment_id(name: &[u8], suffix: &str) -> Result<u64, Error> {
+    let bad = || {
+        corrupt(format!(
+            "bad segment file name {:?}",
+            String::from_utf8_lossy(name)
+        ))
+    };
+    let hex = name.strip_suffix(suffix.as_bytes()).ok_or_else(bad)?;
+    if hex.len() != 16 {
+        return Err(bad());
+    }
+    let hex = std::str::from_utf8(hex).map_err(|_| bad())?;
+    if !hex.bytes().all(|c| c.is_ascii_hexdigit()) {
+        return Err(bad());
+    }
+    u64::from_str_radix(hex, 16).map_err(|_| bad())
+}
+
+impl Store {
+    /// Opens (creating if necessary) a store rooted at `dir` with the default
+    /// [`Options`]. Only one `Store` may have a given dir open at a time
+    /// (flock on the directory). Sealed segments are mmap'd and validated;
+    /// the active segment, if any, is tail-scanned and truncated to its last
+    /// valid record (Go: `Open`).
+    pub fn open(dir: impl AsRef<Path>) -> Result<Store, Error> {
+        Store::open_with(dir, Options::default())
+    }
+
+    /// [`Store::open`] with explicit [`Options`].
+    pub fn open_with(dir: impl AsRef<Path>, cfg: Options) -> Result<Store, Error> {
+        let dir = dir.as_ref().to_path_buf();
+        fs::create_dir_all(&dir)
+            .map_err(|e| Error::Other(format!("packstore: creating {}: {e}", dir.display())))?;
+        let dir_f = File::open(&dir)?;
+        // SAFETY: plain flock(2) on a valid open fd; no memory is involved.
+        let rc = unsafe { libc::flock(dir_f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if rc != 0 {
+            let e = io::Error::last_os_error();
+            return Err(Error::Other(format!(
+                "packstore: {} is already open: {e}",
+                dir.display()
+            )));
+        }
+        Store::load(dir, dir_f, cfg)
+    }
+
+    /// Scans the directory: sealed segments are opened and validated, the
+    /// active segment (at most one) is recovered (Go: `load` +
+    /// `recoverActive`).
+    fn load(dir: PathBuf, dir_f: File, cfg: Options) -> Result<Store, Error> {
+        let mut names: Vec<Vec<u8>> = Vec::new();
+        for entry in fs::read_dir(&dir)? {
+            names.push(entry?.file_name().as_encoded_bytes().to_vec());
+        }
+        names.sort(); // Go's os.ReadDir returns names sorted
+
+        let mut sealed: Vec<Arc<SealedSegment>> = Vec::new();
+        let mut active_names: Vec<Vec<u8>> = Vec::new();
+        let mut next_id = 1u64;
+        for name in &names {
+            if name.ends_with(ACTIVE_SUFFIX.as_bytes()) {
+                active_names.push(name.clone());
+            } else if name.ends_with(SEALED_SUFFIX.as_bytes()) {
+                let id = parse_segment_id(name, SEALED_SUFFIX)?;
+                let path = dir.join(String::from_utf8_lossy(name).as_ref());
+                sealed.push(Arc::new(SealedSegment::open(&path, id)?));
+                if id >= next_id {
+                    next_id = id + 1;
+                }
+            }
+            // Anything else (e.g. .DS_Store) is ignored.
+        }
+        sealed.sort_by_key(|s| s.id);
+
+        if active_names.len() > 1 {
+            let list = active_names
+                .iter()
+                .map(|n| String::from_utf8_lossy(n).into_owned())
+                .collect::<Vec<_>>()
+                .join(" ");
+            return Err(corrupt(format!(
+                "{} active segments, want at most one: [{list}]",
+                active_names.len()
+            )));
+        }
+
+        let mut active: Option<ActiveWriter> = None;
+        if let Some(name) = active_names.first() {
+            // Tail-scan the file, then either complete a crashed seal-rename
+            // or truncate it to its valid prefix and resume it.
+            let id = parse_segment_id(name, ACTIVE_SUFFIX)?;
+            let name = String::from_utf8_lossy(name).into_owned();
+            let path = dir.join(&name);
+            let res = scan_active(&path)?;
+            if id >= next_id {
+                next_id = id + 1;
+            }
+            if res.sealed {
+                // Crash between footer-write and rename: complete the rename.
+                let sealed_name = name.strip_suffix(".active").unwrap_or(&name);
+                let sealed_path = dir.join(sealed_name);
+                fs::rename(&path, &sealed_path)?;
+                dir_f.sync_all()?;
+                sealed.push(Arc::new(SealedSegment::open(&sealed_path, id)?));
+                sealed.sort_by_key(|s| s.id);
+            } else {
+                let f = OpenOptions::new().read(true).write(true).open(&path)?;
+                let size = if res.size < MAGIC_HEADER.len() as u64 {
+                    // Header never became durable: reset to a fresh header.
+                    // This is deliberate and silent; nothing acknowledged is
+                    // lost.
+                    f.set_len(0)?;
+                    f.write_all_at(&MAGIC_HEADER, 0)?;
+                    MAGIC_HEADER.len() as u64
+                } else {
+                    f.set_len(res.size)?;
+                    res.size
+                };
+                let seg = Arc::new(ActiveSegment {
+                    id,
+                    path,
+                    f,
+                    index: RwLock::new(res.index),
+                });
+                active = Some(ActiveWriter { seg, size });
+            }
+        }
+
+        let shared_active = active.as_ref().map(|a| a.seg.clone());
+        Ok(Store {
+            dir,
+            cfg,
+            append: Mutex::new(AppendState {
+                dir_f: Some(dir_f),
+                active,
+                next_id,
+            }),
+            shared: RwLock::new(Shared {
+                sealed,
+                active: shared_active,
+                closed: false,
+                failed: None,
+            }),
+        })
+    }
+
+    fn append_lock(&self) -> MutexGuard<'_, AppendState> {
+        unpoison(self.append.lock())
+    }
+
+    /// Opens the next-numbered active segment. Called under the append lock
+    /// (Go: `createActive`).
+    fn create_active(&self, ap: &mut AppendState) -> Result<(), Error> {
+        let Some(dir_f) = ap.dir_f.as_ref() else {
+            return Err(Error::Closed);
+        };
+        let id = ap.next_id;
+        ap.next_id += 1;
+        let path = self.dir.join(format!("{id:016x}{ACTIVE_SUFFIX}"));
+        let f = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        let init = (|| -> io::Result<()> {
+            f.write_all_at(&MAGIC_HEADER, 0)?;
+            f.sync_all()?;
+            dir_f.sync_all()
+        })();
+        if let Err(e) = init {
+            // Never leave a second .seg.active to brick the next open.
+            drop(f);
+            let _ = fs::remove_file(&path);
+            return Err(e.into());
+        }
+        let seg = Arc::new(ActiveSegment {
+            id,
+            path,
+            f,
+            index: RwLock::new(HashMap::new()),
+        });
+        unpoison(self.shared.write()).active = Some(seg.clone());
+        ap.active = Some(ActiveWriter {
+            seg,
+            size: MAGIC_HEADER.len() as u64,
+        });
+        Ok(())
+    }
+
+    /// Writes one encoded record to the active segment (creating it if
+    /// needed), publishes it in the active index, optionally fsyncs, and
+    /// seals the segment if it reached the rotation threshold (Go: `append`).
+    fn append(&self, k: Key, rec: &[u8], sync_now: bool) -> Result<(), Error> {
+        let mut ap = self.append_lock();
+        {
+            let sh = unpoison(self.shared.read());
+            if sh.closed {
+                return Err(Error::Closed);
+            }
+            if let Some(msg) = &sh.failed {
+                return Err(Error::Failed(msg.clone()));
+            }
+        }
+        if ap.active.is_none() {
+            self.create_active(&mut ap)?;
+        }
+        let Some(aw) = ap.active.as_mut() else {
+            return Err(Error::Closed); // unreachable: create_active succeeded
+        };
+        if unpoison(aw.seg.index.read()).contains_key(&k) {
+            return Ok(()); // lost a Put race for this key; the record is already appended
+        }
+        let off = aw.size;
+        aw.seg.f.write_all_at(rec, off)?;
+        let loc = ActiveLoc {
+            off,
+            flags: rec[33],
+            ulen: be_u32(rec, 34),
+            slen: be_u32(rec, 38),
+        };
+        unpoison(aw.seg.index.write()).insert(k, loc);
+        aw.size = off + rec.len() as u64;
+
+        if sync_now && self.cfg.sync {
+            let res = aw.seg.f.sync_all();
+            if let Err(e) = res {
+                self.set_failed(&e);
+                return Err(e.into());
+            }
+        }
+        if ap
+            .active
+            .as_ref()
+            .is_some_and(|a| a.size >= self.cfg.segment_size)
+        {
+            // A mid-seal failure can leave a renamed-but-unpublished segment;
+            // reads stay correct (the fd is still open), but accepting
+            // further writes could append past a footer. Poison the write
+            // path; reopen recovers cleanly.
+            if let Err(e) = self.seal_active(&mut ap) {
+                self.set_failed(&e);
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+
+    /// Fsyncs the active segment, if syncing is enabled and one exists (Go:
+    /// `syncActive`).
+    fn sync_active(&self) -> Result<(), Error> {
+        let ap = self.append_lock();
+        {
+            let sh = unpoison(self.shared.read());
+            if sh.closed {
+                return Err(Error::Closed);
+            }
+            if let Some(msg) = &sh.failed {
+                return Err(Error::Failed(msg.clone()));
+            }
+        }
+        if !self.cfg.sync {
+            return Ok(());
+        }
+        let Some(aw) = ap.active.as_ref() else {
+            return Ok(());
+        };
+        if let Err(e) = aw.seg.f.sync_all() {
+            self.set_failed(&e);
+            return Err(e.into());
+        }
+        Ok(())
+    }
+
+    /// Poisons the write path after an fsync failure: a failed fsync may have
+    /// dropped dirty pages, so later appends could be acknowledged while
+    /// sitting behind a garbage hole that tail-scan recovery would truncate.
+    /// Reads stay available; only new acknowledgments stop. Called under the
+    /// append lock (Go: `setFailed`).
+    fn set_failed(&self, err: &dyn std::fmt::Display) {
+        let mut sh = unpoison(self.shared.write());
+        if sh.failed.is_none() {
+            sh.failed = Some(err.to_string());
+        }
+    }
+
+    /// Seals the active segment: build the footer from the in-RAM index (no
+    /// body re-read), append it, fsync, rename to `.seg`, fsync the
+    /// directory, and swap in the mmap'd sealed segment. Called under the
+    /// append lock (Go: `sealActiveLocked`).
+    fn seal_active(&self, ap: &mut AppendState) -> Result<(), Error> {
+        let Some(aw) = ap.active.as_ref() else {
+            return Ok(());
+        };
+        let entries: Vec<footer::IndexEntry> = unpoison(aw.seg.index.read())
+            .iter()
+            .map(|(k, loc)| footer::IndexEntry {
+                k: *k,
+                off: loc.off,
+                slen: loc.slen,
+            })
+            .collect();
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let ftr = footer::build_footer(aw.size, &entries)?;
+        aw.seg.f.write_all_at(&ftr, aw.size)?;
+        aw.seg.f.sync_all()?;
+        let path_str = aw.seg.path.to_string_lossy().into_owned();
+        let sealed_path = PathBuf::from(path_str.strip_suffix(".active").unwrap_or(&path_str));
+        fs::rename(&aw.seg.path, &sealed_path)?;
+        let Some(dir_f) = ap.dir_f.as_ref() else {
+            return Err(Error::Closed);
+        };
+        dir_f.sync_all()?;
+        let seg = SealedSegment::open(&sealed_path, aw.seg.id)?;
+        {
+            let mut sh = unpoison(self.shared.write());
+            sh.sealed.push(Arc::new(seg));
+            sh.active = None;
+        }
+        // Drop the writer's handle only after the swap: readers that resolved
+        // a location before it route to the fd their own Arc keeps alive, and
+        // post-swap readers route to the sealed mmap. (Go closes the fd here
+        // and can surface a close error; Rust closes it when the last Arc
+        // drops, which cannot report one — see port-notes.)
+        ap.active = None;
+        Ok(())
+    }
+
+    /// Stores every object the iterator yields, fsyncing once at the end
+    /// (when syncing is enabled): on return, all yielded objects are durable.
+    /// It is NOT atomic — a crash or iterator error can leave a valid prefix
+    /// stored. In a content-addressed store that prefix is harmless:
+    /// identical re-pushed content deduplicates. Objects repeated within the
+    /// batch, or already present, are written once. When `write_batch`
+    /// returns an error after appending part of the batch, it best-effort
+    /// fsyncs that prefix first, so visible records never stay non-durable
+    /// (Go: `WriteBatch`).
+    pub fn write_batch<I, E>(&self, seq: I) -> Result<(), Error>
+    where
+        I: IntoIterator<Item = Result<Object, E>>,
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        let mut seen: HashSet<Key> = HashSet::new();
+        let mut appended = false;
+        let fail = |appended: bool, err: Error| -> Error {
+            if appended {
+                let _ = self.sync_active(); // best-effort; an fsync failure poisons the store
+            }
+            err
+        };
+        for item in seq {
+            let obj = match item {
+                Ok(o) => o,
+                Err(e) => return Err(fail(appended, Error::Source(Box::new(e)))),
+            };
+            if !seen.insert(obj.key) {
+                continue;
+            }
+            let has = match self.has(obj.key) {
+                Ok(h) => h,
+                Err(e) => {
+                    return Err(fail(
+                        appended,
+                        Error::Context {
+                            msg: format!("exists ({})", obj.key),
+                            source: Box::new(e),
+                        },
+                    ));
+                }
+            };
+            if has {
+                continue;
+            }
+            let rec = match encode_record(obj.key, &obj.data) {
+                Ok(r) => r,
+                Err(e) => return Err(fail(appended, Error::Pack(e))),
+            };
+            if let Err(e) = self.append(obj.key, &rec, false) {
+                return Err(fail(appended, e));
+            }
+            appended = true;
+        }
+        self.sync_active()
+    }
+
+    /// Stores a single object under `k`, deduplicating against existing
+    /// content. A dedup hit returns success without fsyncing; if the matching
+    /// record was appended by a still-running batch, its durability rides on
+    /// that batch's commit (Go: `Put`).
+    pub fn put(&self, k: Key, data: &[u8]) -> Result<(), Error> {
+        {
+            let sh = unpoison(self.shared.read());
+            if let Some(msg) = &sh.failed {
+                return Err(Error::Failed(msg.clone()));
+            }
+        }
+        if self.has(k)? {
+            return Ok(());
+        }
+        let rec = encode_record(k, data).map_err(Error::Pack)?;
+        self.append(k, &rec, true)
+    }
+
+    /// Returns the bytes stored under `k`, or [`Error::NotFound`] if `k` is
+    /// absent. The returned buffer is caller-owned (Go: `Get`).
+    pub fn get(&self, k: Key) -> Result<Vec<u8>, Error> {
+        let sh = unpoison(self.shared.read());
+        if sh.closed {
+            return Err(Error::Closed);
+        }
+        if let Some(a) = &sh.active {
+            let loc = unpoison(a.index.read()).get(&k).copied();
+            if let Some(loc) = loc {
+                let mut stored = vec![0u8; loc.slen as usize];
+                a.f.read_exact_at(&mut stored, loc.off + REC_HEADER_SIZE as u64)?;
+                return decode_payload(loc.flags, loc.ulen, &stored).map_err(|e| Error::Corrupt {
+                    msg: e.to_string(),
+                    verify: false,
+                });
+            }
+        }
+        for seg in sh.sealed.iter().rev() {
+            // A corrupt segment fails the read loudly rather than falling
+            // back to older copies: masking corruption would hide real damage
+            // from scrub.
+            if let Some(data) = seg.get(k)? {
+                return Ok(data);
+            }
+        }
+        Err(Error::NotFound)
+    }
+
+    /// Returns a caller-owned copy of the full on-disk record stored under
+    /// `k` — its 46-byte header plus the stored (still-compressed) payload,
+    /// exactly as written by [`encode_record`] — or [`Error::NotFound`] if
+    /// `k` is absent. This is the zero-copy push path: the record is
+    /// wire-format-identical, so a caller can hand it to
+    /// `amberpack::Writer::add_record` without decompressing and re-encoding.
+    /// Like [`Store::get`], it does not CRC-check; the receiving reader
+    /// validates framing and CRC (Go: `GetRecord`).
+    pub fn get_record(&self, k: Key) -> Result<Vec<u8>, Error> {
+        let sh = unpoison(self.shared.read());
+        if sh.closed {
+            return Err(Error::Closed);
+        }
+        if let Some(a) = &sh.active {
+            let loc = unpoison(a.index.read()).get(&k).copied();
+            if let Some(loc) = loc {
+                let mut rec = vec![0u8; REC_HEADER_SIZE + loc.slen as usize];
+                a.f.read_exact_at(&mut rec, loc.off)?;
+                return Ok(rec);
+            }
+        }
+        for seg in sh.sealed.iter().rev() {
+            if let Some(rec) = seg.get_record(k)? {
+                return Ok(rec);
+            }
+        }
+        Err(Error::NotFound)
+    }
+
+    /// Returns the stored (post-compression) payload length of the object
+    /// under `k`, or `None` if absent, reading only the index — no payload
+    /// read. It sizes objects for byte-balanced push batching against the
+    /// bytes that actually travel (Go: `StoredSize`).
+    pub fn stored_size(&self, k: Key) -> Result<Option<u64>, Error> {
+        let sh = unpoison(self.shared.read());
+        if sh.closed {
+            return Err(Error::Closed);
+        }
+        if let Some(a) = &sh.active {
+            let loc = unpoison(a.index.read()).get(&k).copied();
+            if let Some(loc) = loc {
+                return Ok(Some(u64::from(loc.slen)));
+            }
+        }
+        for seg in sh.sealed.iter().rev() {
+            if let Some(slen) = seg.stored_size(k) {
+                return Ok(Some(u64::from(slen)));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Returns the segment id and record offset where `k` lives, for ordering
+    /// reads by physical layout. Caller holds the shared lock (Go:
+    /// `locateLocked`).
+    fn locate_in(sh: &Shared, k: Key) -> Option<(u64, u64)> {
+        if let Some(a) = &sh.active {
+            let loc = unpoison(a.index.read()).get(&k).copied();
+            if let Some(loc) = loc {
+                return Some((a.id, loc.off));
+            }
+        }
+        for seg in sh.sealed.iter().rev() {
+            if let Some(off) = seg.locate(k) {
+                return Some((seg.id, off));
+            }
+        }
+        None
+    }
+
+    /// Reorders `keys` in place to follow the store's on-disk layout —
+    /// grouped by segment, ascending offset within a segment — so reading
+    /// them in order is a near-sequential sweep per segment rather than
+    /// scattered random access. Absent keys sort last (their reads surface
+    /// [`Error::NotFound`] later). It is a no-op on a closed store (Go:
+    /// `SortByLocation`).
+    pub fn sort_by_location(&self, keys: &mut [Key]) {
+        struct Located {
+            k: Key,
+            seg: u64,
+            off: u64,
+            ok: bool,
+        }
+        let mut items: Vec<Located> = {
+            let sh = unpoison(self.shared.read());
+            if sh.closed {
+                return;
+            }
+            keys.iter()
+                .map(|&k| match Store::locate_in(&sh, k) {
+                    Some((seg, off)) => Located {
+                        k,
+                        seg,
+                        off,
+                        ok: true,
+                    },
+                    None => Located {
+                        k,
+                        seg: 0,
+                        off: 0,
+                        ok: false,
+                    },
+                })
+                .collect()
+        };
+        items.sort_by(|a, b| {
+            // Present keys before absent ones, then (segment, offset).
+            (!a.ok, a.seg, a.off).cmp(&(!b.ok, b.seg, b.off))
+        });
+        for (dst, item) in keys.iter_mut().zip(&items) {
+            *dst = item.k;
+        }
+    }
+
+    /// Reports whether an object is stored under `k` (Go: `Has`).
+    pub fn has(&self, k: Key) -> Result<bool, Error> {
+        let sh = unpoison(self.shared.read());
+        if sh.closed {
+            return Err(Error::Closed);
+        }
+        if let Some(a) = &sh.active {
+            let hit = unpoison(a.index.read()).contains_key(&k);
+            if hit {
+                return Ok(true);
+            }
+        }
+        Ok(sh.sealed.iter().rev().any(|seg| seg.has(k)))
+    }
+
+    /// Deletes every object: the active segment and all sealed segments are
+    /// detached and their files removed, leaving an empty, still-open store
+    /// (the store-wipe operation). Readers are drained via the write lock
+    /// before segments are detached; an in-flight [`Store::verify`] keeps its
+    /// snapshot's mappings alive independently. `next_id` stays monotonic so
+    /// segment names never repeat within a session (Go: `Wipe`).
+    pub fn wipe(&self) -> Result<(), Error> {
+        let mut ap = self.append_lock();
+        let (active, sealed) = {
+            let mut sh = unpoison(self.shared.write());
+            if sh.closed {
+                return Err(Error::Closed);
+            }
+            // A sticky write-path failure poisons the data the fsync may have
+            // torn — data the wipe is about to destroy. The reset clears it:
+            // the reopened-empty store must accept writes again.
+            sh.failed = None;
+            (sh.active.take(), std::mem::take(&mut sh.sealed))
+        };
+        ap.active = None;
+
+        let mut first_err: Option<Error> = None;
+        let mut note = |e: Error| {
+            if first_err.is_none() {
+                first_err = Some(e);
+            }
+        };
+        if let Some(a) = active {
+            if let Err(e) = fs::remove_file(&a.path) {
+                note(e.into());
+            }
+            drop(a); // the fd closes when in-flight readers drop their Arcs
+        }
+        for seg in sealed {
+            if let Err(e) = fs::remove_file(&seg.path) {
+                note(e.into());
+            }
+        }
+        if self.cfg.sync {
+            let res = ap.dir_f.as_ref().map(|dir_f| dir_f.sync_all());
+            if let Some(Err(e)) = res {
+                note(e.into());
+            }
+        }
+        first_err.map_or(Ok(()), Err)
+    }
+
+    /// Fsyncs and closes the active segment (without sealing it), detaches
+    /// all sealed segments, and releases the directory lock. Idempotent (Go:
+    /// `Close`; an in-flight [`Store::verify`] keeps its snapshot alive, so
+    /// unlike Go there is nothing to wait for — see port-notes).
+    pub fn close(&self) -> Result<(), Error> {
+        let mut ap = self.append_lock();
+        let mut sh = unpoison(self.shared.write());
+        if sh.closed {
+            return Ok(());
+        }
+        sh.closed = true;
+        let mut first_err: Option<Error> = None;
+        if let Some(aw) = ap.active.take() {
+            let res = aw.seg.f.sync_all();
+            if let Err(e) = res {
+                first_err.get_or_insert(e.into());
+            }
+        }
+        sh.active = None;
+        sh.sealed.clear();
+        ap.dir_f = None; // releases the flock
+        first_err.map_or(Ok(()), Err)
+    }
+}
+
+impl Drop for Store {
+    fn drop(&mut self) {
+        let _ = self.close();
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod testutil;
+
+#[cfg(test)]
+mod store_tests;
