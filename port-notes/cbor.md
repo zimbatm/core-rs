@@ -48,10 +48,21 @@ does works identically.
 - **`read_bstr` returns a borrowed subslice** where Go returns a copy.
   Callers that keep data copy it themselves (`decode_xattrs` does); no
   observable difference.
-- **No preallocation from attacker-controlled map count.** Go does
-  `make(map, n)` (its runtime ignores absurd hints); `BTreeMap` has no
-  capacity hint, so a bogus huge count just loops until `read_bstr` hits
-  EOF on the first missing pair — same observable behavior as Go.
+- **No preallocation from attacker-controlled map count — deliberate
+  divergence, Go has a DoS here.** Go does `make(map[string][]byte, n)` with
+  the decoded (attacker-controlled) pair count. Contrary to folklore, the Go
+  runtime does *not* ignore large hints that pass its `hint*bucketSize ≤
+  maxAlloc` check: verified against the reference implementation,
+  `DecodeXattrs([0xBA,0xFF,0xFF,0xFF,0xFF])` (a 5-byte input claiming 2^32-1
+  pairs) eagerly allocates a terabyte-scale bucket array and the process is
+  OOM-killed before any pair is read. (Counts ≥ 2^63 wrap negative in
+  `makemap64`, clamp to 0, and error cleanly; the dangerous band is roughly
+  2^20..2^38.) The Rust port uses `BTreeMap` with no capacity hint, so any
+  bogus count just fails at the first missing pair with
+  `XattrKey{index:0, UnexpectedEof}` — this is required by the porting
+  contract ("never panic on untrusted input"; pinned by
+  `decode_xattrs_huge_count_errors_promptly`) and should be listed in the
+  compatibility-differences report and reported against the Go original.
 - **Validation order matches Go exactly**: head first, then major check,
   then per-pair key/value reads (each wrapping errors with index / name
   context), trailing-bytes check last.
@@ -69,6 +80,18 @@ Integration test: `tests/cbor.rs` (public-API smoke; no `common` helpers
 needed since there are no vectors). Note: `cargo test cbor` name-filters the
 integration tests out (their fn names don't contain "cbor"); use
 `cargo test --test cbor` for those.
+
+## Reviewer verification (differential fuzz vs Go)
+
+The reviewer ran a 2517-case differential corpus (random garbage, valid
+canonical maps, valid maps with non-shortest heads, single-byte-flip /
+truncate / append mutations, handcrafted edges) through Go `DecodeXattrs` +
+`EncodeXattrs` re-encode and the Rust port side by side. All 2505
+Go-survivable cases produced identical outcomes: same accept/reject decision,
+same error class with the same wrapped key-index / value-name structure and
+diagnostic numbers, and byte-identical canonical re-encodings. The remaining
+12 cases (huge claimed map counts) OOM-kill the **Go** process (see the DoS
+note above); Rust rejects them cleanly.
 
 ## Shared-file issue (not fixed here, per hard rules)
 

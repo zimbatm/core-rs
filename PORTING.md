@@ -89,11 +89,13 @@ unless the length is the single `0x00` byte. `new_from_hash` truncates the
 
 ### `cbor` (Go: `cborx/`)
 
-Canonical heads (shortest form), byte strings, and the xattr map codec with
-keys sorted by their **encoded** bytes. Also expose the primitive
-`append_head`/`read_head` helpers for `fstree`/`reference` to reuse. Decode
-accepts only what encode emits (definite lengths, shortest heads) and rejects
-trailing bytes.
+Canonical heads (shortest form) on **encode**; byte strings; and the xattr
+map codec with keys sorted by their **encoded** bytes. Also expose the
+primitive `append_head`/`read_head` helpers for `fstree`/`reference` to
+reuse. Decode matches Go's actual behavior (not its doc comment): `readHead`
+accepts **all five definite-length head forms**, including non-shortest ones,
+and rejects only additional-info 28–31; trailing bytes are rejected. Do not
+"fix" this laxness — read-compatibility with Go depends on it.
 
 ### `chunkers` (Go: `chunkers/` + vendored ultracdc)
 
