@@ -1,0 +1,164 @@
+{
+  "cases": [
+    {
+      "type": 0,
+      "length": "0",
+      "payload": {
+        "kind": "splitmix",
+        "seed": 0,
+        "len": 0
+      },
+      "key": "0000af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f"
+    },
+    {
+      "type": 0,
+      "length": "1",
+      "payload": {
+        "kind": "splitmix",
+        "seed": 100,
+        "len": 1
+      },
+      "key": "00013afcdd8a9bd7b7458c2af708163c0a3259bef038576403af0d2c411a174c"
+    },
+    {
+      "type": 1,
+      "length": "255",
+      "payload": {
+        "kind": "splitmix",
+        "seed": 101,
+        "len": 255
+      },
+      "key": "10ffaa114d2337db9a84b83ba14780ccf57977ac1945636422bf05e722f48c38"
+    },
+    {
+      "type": 2,
+      "length": "256",
+      "payload": {
+        "kind": "splitmix",
+        "seed": 102,
+        "len": 256
+      },
+      "key": "21010009dd96551d4a564e5dec4201fc3960588eead5f994475f5a59d7edccf4"
+    },
+    {
+      "type": 3,
+      "length": "65535",
+      "payload": {
+        "kind": "splitmix",
+        "seed": 103,
+        "len": 65535
+      },
+      "key": "31ffffddf6ce08f02e4078d0eac3dd416558dc969396446ce05daeffae267ea8"
+    },
+    {
+      "type": 4,
+      "length": "65536",
+      "payload": {
+        "kind": "splitmix",
+        "seed": 104,
+        "len": 65536
+      },
+      "key": "420100009cc6a8502f8e44a00ee7974264d40acea6fcd17ab4b6871a3da41de3"
+    },
+    {
+      "type": 0,
+      "length": "16777216",
+      "payload": {
+        "kind": "splitmix",
+        "seed": 105,
+        "len": 64
+      },
+      "key": "0301000000c8e0c60363a57ffc5edfda5d08bf972ba265fd0f9ad51aef518096"
+    },
+    {
+      "type": 1,
+      "length": "4294967296",
+      "payload": {
+        "kind": "splitmix",
+        "seed": 106,
+        "len": 64
+      },
+      "key": "14010000000096cb58bcc383d53b83ffcf008b203fbf3e90d458bbb9703bba76"
+    },
+    {
+      "type": 2,
+      "length": "1099511627776",
+      "payload": {
+        "kind": "splitmix",
+        "seed": 107,
+        "len": 64
+      },
+      "key": "25010000000000dbf9c9723ace3a25bb456f79a8e6b1b72e23fb4edb54a162e7"
+    },
+    {
+      "type": 3,
+      "length": "281474976710656",
+      "payload": {
+        "kind": "splitmix",
+        "seed": 108,
+        "len": 64
+      },
+      "key": "360100000000000042c2e6079cb1d6d388379713e33a7b48697fd9a46b0c3d2a"
+    },
+    {
+      "type": 4,
+      "length": "9007199254740993",
+      "payload": {
+        "kind": "splitmix",
+        "seed": 109,
+        "len": 64
+      },
+      "key": "4620000000000001c2f84edbafabf2343f869eb675147222a206e6ec65c57ee1"
+    },
+    {
+      "type": 0,
+      "length": "18446744073709551615",
+      "payload": {
+        "kind": "splitmix",
+        "seed": 110,
+        "len": 64
+      },
+      "key": "07ffffffffffffffff84a6c0af8e828a7dcb8260decd6bbb23e19fa81fafc4fd"
+    },
+    {
+      "type": 0,
+      "length": "5",
+      "payload": {
+        "kind": "splitmix",
+        "seed": 111,
+        "len": 100
+      },
+      "key": "0005c40ed17fa0fc5a0eb272f96e8763a1050e2e6da8d63ab346680e14a11e6c"
+    },
+    {
+      "type": 1,
+      "length": "1000000",
+      "payload": {
+        "kind": "const",
+        "byte": 127,
+        "len": 10
+      },
+      "key": "120f4240303e3be2775c5f2444153b7d33f79e22c238aa211f51fcd897108f9c"
+    },
+    {
+      "type": 2,
+      "length": "300",
+      "payload": {
+        "kind": "concat",
+        "parts": [
+          {
+            "kind": "splitmix",
+            "seed": 112,
+            "len": 100
+          },
+          {
+            "kind": "const",
+            "byte": 1,
+            "len": 200
+          }
+        ]
+      },
+      "key": "21012cd681198d7198602762a29e1a6a3c7d384907dfaeaabc4fc92ab8fbd46a"
+    }
+  ]
+}

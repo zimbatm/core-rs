@@ -94,7 +94,9 @@ blob; directory: `NewDirBuilder` over entries pre-sorted bytewise by name).
 **Tree definition.** Root directory entries (listed here unsorted; builders
 receive them sorted bytewise by name). `mt(s, ns)` below means mtime
 `s*1e9 + ns` nanoseconds; uid/gid default 1000/1000, files mode 0o100644,
-dirs 0o40755 unless stated.
+dirs 0o40755 unless stated. Any metadata field not stated is zero — in
+particular every root-table entry (including the `sub` and `bigdir`
+directories themselves) has mtime 0.
 
 | name | kind | details |
 |------|------|---------|
@@ -126,10 +128,10 @@ dirs 0o40755 unless stated.
 `data(1000+i, i mod 50)` (60 of them empty ⇒ dedup), mode 0o100644,
 uid 1000, gid 1000, mt(1700000000 + i, i).
 
-Xattr spill rule (from Go `ingest`): xattrs stay inline iff the serialized
-canonical CBOR xattr map is ≤ 256 bytes, else the map becomes an `XattrSet`
-object referenced by key 9. (Verify against Go `ingest/meta.go` when
-implementing.)
+Xattr spill rule (from Go `ingest/driver.go`, `buildEntry`): xattrs stay
+inline iff the serialized canonical CBOR xattr map is ≤ 256 bytes
+(`len(enc) <= xattrInlineMax`), else the map becomes an `XattrSet` object
+referenced by key 9.
 
 ### `amberpack/`
 
@@ -221,4 +223,9 @@ skipped). The Rust exporter must produce **byte-identical** output.
 root (`""` = root). Semantics follow the Go `amberignore` package (gitignore:
 negation, `**`, directory-only `name/`, anchored `/name`, last match wins,
 subtree scoping). The Go implementation is the oracle; cases cover each
-feature and composition across levels.
+feature and composition across levels. Each check is evaluated the way the
+ingest walk asks the matcher: descend from the root creating a child matcher
+per directory; if any ancestor directory of the path is `Ignored` the path
+reports ignored (the subtree is pruned — re-inclusion under an ignored
+directory is impossible); otherwise the final component's `Ignored(name,
+is_dir)` answer is recorded.

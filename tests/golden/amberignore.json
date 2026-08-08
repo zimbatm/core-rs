@@ -1,0 +1,541 @@
+{
+  "cases": [
+    {
+      "name": "literal",
+      "files": [
+        {
+          "dir": "",
+          "lines": [
+            "foo.txt"
+          ]
+        }
+      ],
+      "checks": [
+        {
+          "path": "foo.txt",
+          "is_dir": false,
+          "ignored": true
+        },
+        {
+          "path": "foo.txt",
+          "is_dir": true,
+          "ignored": true
+        },
+        {
+          "path": "bar.txt",
+          "is_dir": false,
+          "ignored": false
+        },
+        {
+          "path": "sub/foo.txt",
+          "is_dir": false,
+          "ignored": true
+        },
+        {
+          "path": "foo.txt.bak",
+          "is_dir": false,
+          "ignored": false
+        }
+      ]
+    },
+    {
+      "name": "wildcard",
+      "files": [
+        {
+          "dir": "",
+          "lines": [
+            "*.log"
+          ]
+        }
+      ],
+      "checks": [
+        {
+          "path": "a.log",
+          "is_dir": false,
+          "ignored": true
+        },
+        {
+          "path": "a.log",
+          "is_dir": true,
+          "ignored": true
+        },
+        {
+          "path": "b.txt",
+          "is_dir": false,
+          "ignored": false
+        },
+        {
+          "path": "sub/deep/c.log",
+          "is_dir": false,
+          "ignored": true
+        },
+        {
+          "path": "log",
+          "is_dir": false,
+          "ignored": false
+        }
+      ]
+    },
+    {
+      "name": "question-and-class",
+      "files": [
+        {
+          "dir": "",
+          "lines": [
+            "file?.txt",
+            "[abc].dat"
+          ]
+        }
+      ],
+      "checks": [
+        {
+          "path": "file1.txt",
+          "is_dir": false,
+          "ignored": true
+        },
+        {
+          "path": "file12.txt",
+          "is_dir": false,
+          "ignored": false
+        },
+        {
+          "path": "a.dat",
+          "is_dir": false,
+          "ignored": true
+        },
+        {
+          "path": "d.dat",
+          "is_dir": false,
+          "ignored": false
+        }
+      ]
+    },
+    {
+      "name": "dir-only",
+      "files": [
+        {
+          "dir": "",
+          "lines": [
+            "build/"
+          ]
+        }
+      ],
+      "checks": [
+        {
+          "path": "build",
+          "is_dir": true,
+          "ignored": true
+        },
+        {
+          "path": "build",
+          "is_dir": false,
+          "ignored": false
+        },
+        {
+          "path": "build/output.txt",
+          "is_dir": false,
+          "ignored": true
+        },
+        {
+          "path": "src/build",
+          "is_dir": true,
+          "ignored": true
+        },
+        {
+          "path": "src/build",
+          "is_dir": false,
+          "ignored": false
+        }
+      ]
+    },
+    {
+      "name": "anchored",
+      "files": [
+        {
+          "dir": "",
+          "lines": [
+            "/top.txt"
+          ]
+        }
+      ],
+      "checks": [
+        {
+          "path": "top.txt",
+          "is_dir": false,
+          "ignored": true
+        },
+        {
+          "path": "sub/top.txt",
+          "is_dir": false,
+          "ignored": false
+        }
+      ]
+    },
+    {
+      "name": "anchored-subpath",
+      "files": [
+        {
+          "dir": "",
+          "lines": [
+            "docs/internal"
+          ]
+        }
+      ],
+      "checks": [
+        {
+          "path": "docs/internal",
+          "is_dir": true,
+          "ignored": true
+        },
+        {
+          "path": "docs/internal",
+          "is_dir": false,
+          "ignored": true
+        },
+        {
+          "path": "other/docs/internal",
+          "is_dir": true,
+          "ignored": false
+        },
+        {
+          "path": "internal",
+          "is_dir": true,
+          "ignored": false
+        }
+      ]
+    },
+    {
+      "name": "doublestar-leading",
+      "files": [
+        {
+          "dir": "",
+          "lines": [
+            "**/temp"
+          ]
+        }
+      ],
+      "checks": [
+        {
+          "path": "temp",
+          "is_dir": false,
+          "ignored": true
+        },
+        {
+          "path": "a/temp",
+          "is_dir": false,
+          "ignored": true
+        },
+        {
+          "path": "a/b/c/temp",
+          "is_dir": false,
+          "ignored": true
+        },
+        {
+          "path": "a/temperature",
+          "is_dir": false,
+          "ignored": false
+        }
+      ]
+    },
+    {
+      "name": "doublestar-middle",
+      "files": [
+        {
+          "dir": "",
+          "lines": [
+            "a/**/b"
+          ]
+        }
+      ],
+      "checks": [
+        {
+          "path": "a/b",
+          "is_dir": false,
+          "ignored": true
+        },
+        {
+          "path": "a/x/b",
+          "is_dir": false,
+          "ignored": true
+        },
+        {
+          "path": "a/x/y/b",
+          "is_dir": false,
+          "ignored": true
+        },
+        {
+          "path": "x/a/b",
+          "is_dir": false,
+          "ignored": false
+        }
+      ]
+    },
+    {
+      "name": "doublestar-trailing",
+      "files": [
+        {
+          "dir": "",
+          "lines": [
+            "logs/**"
+          ]
+        }
+      ],
+      "checks": [
+        {
+          "path": "logs",
+          "is_dir": true,
+          "ignored": true
+        },
+        {
+          "path": "logs/a.txt",
+          "is_dir": false,
+          "ignored": true
+        },
+        {
+          "path": "logs/deep/b.txt",
+          "is_dir": false,
+          "ignored": true
+        },
+        {
+          "path": "other/a.txt",
+          "is_dir": false,
+          "ignored": false
+        }
+      ]
+    },
+    {
+      "name": "negation-last-wins",
+      "files": [
+        {
+          "dir": "",
+          "lines": [
+            "*.log",
+            "!keep.log"
+          ]
+        }
+      ],
+      "checks": [
+        {
+          "path": "a.log",
+          "is_dir": false,
+          "ignored": true
+        },
+        {
+          "path": "keep.log",
+          "is_dir": false,
+          "ignored": false
+        },
+        {
+          "path": "sub/keep.log",
+          "is_dir": false,
+          "ignored": false
+        },
+        {
+          "path": "sub/other.log",
+          "is_dir": false,
+          "ignored": true
+        }
+      ]
+    },
+    {
+      "name": "negation-then-ignore",
+      "files": [
+        {
+          "dir": "",
+          "lines": [
+            "!keep.log",
+            "*.log"
+          ]
+        }
+      ],
+      "checks": [
+        {
+          "path": "keep.log",
+          "is_dir": false,
+          "ignored": true
+        },
+        {
+          "path": "other.log",
+          "is_dir": false,
+          "ignored": true
+        }
+      ]
+    },
+    {
+      "name": "nested-composition",
+      "files": [
+        {
+          "dir": "",
+          "lines": [
+            "*.tmp"
+          ]
+        },
+        {
+          "dir": "sub",
+          "lines": [
+            "!important.tmp",
+            "local.txt"
+          ]
+        }
+      ],
+      "checks": [
+        {
+          "path": "a.tmp",
+          "is_dir": false,
+          "ignored": true
+        },
+        {
+          "path": "local.txt",
+          "is_dir": false,
+          "ignored": false
+        },
+        {
+          "path": "sub/important.tmp",
+          "is_dir": false,
+          "ignored": false
+        },
+        {
+          "path": "sub/other.tmp",
+          "is_dir": false,
+          "ignored": true
+        },
+        {
+          "path": "sub/local.txt",
+          "is_dir": false,
+          "ignored": true
+        },
+        {
+          "path": "sub/deep/important.tmp",
+          "is_dir": false,
+          "ignored": false
+        },
+        {
+          "path": "sub/deep/local.txt",
+          "is_dir": false,
+          "ignored": true
+        }
+      ]
+    },
+    {
+      "name": "nested-anchored",
+      "files": [
+        {
+          "dir": "sub",
+          "lines": [
+            "/only-here.txt"
+          ]
+        }
+      ],
+      "checks": [
+        {
+          "path": "only-here.txt",
+          "is_dir": false,
+          "ignored": false
+        },
+        {
+          "path": "sub/only-here.txt",
+          "is_dir": false,
+          "ignored": true
+        },
+        {
+          "path": "sub/nested/only-here.txt",
+          "is_dir": false,
+          "ignored": false
+        }
+      ]
+    },
+    {
+      "name": "no-reinclude-under-ignored-dir",
+      "files": [
+        {
+          "dir": "",
+          "lines": [
+            "node_modules/",
+            "!node_modules/keep.js"
+          ]
+        }
+      ],
+      "checks": [
+        {
+          "path": "node_modules",
+          "is_dir": true,
+          "ignored": true
+        },
+        {
+          "path": "node_modules/keep.js",
+          "is_dir": false,
+          "ignored": true
+        },
+        {
+          "path": "node_modules/drop.js",
+          "is_dir": false,
+          "ignored": true
+        }
+      ]
+    },
+    {
+      "name": "comments-and-blanks",
+      "files": [
+        {
+          "dir": "",
+          "lines": [
+            "# a comment",
+            "",
+            "   ",
+            "real.txt"
+          ]
+        }
+      ],
+      "checks": [
+        {
+          "path": "real.txt",
+          "is_dir": false,
+          "ignored": true
+        },
+        {
+          "path": "# a comment",
+          "is_dir": false,
+          "ignored": false
+        },
+        {
+          "path": "a comment",
+          "is_dir": false,
+          "ignored": false
+        }
+      ]
+    },
+    {
+      "name": "ignore-everything-but-amberignore",
+      "files": [
+        {
+          "dir": "",
+          "lines": [
+            "*"
+          ]
+        }
+      ],
+      "checks": [
+        {
+          "path": "anything.txt",
+          "is_dir": false,
+          "ignored": true
+        },
+        {
+          "path": "somedir",
+          "is_dir": true,
+          "ignored": true
+        },
+        {
+          "path": ".amberignore",
+          "is_dir": false,
+          "ignored": false
+        },
+        {
+          "path": ".amberignore",
+          "is_dir": true,
+          "ignored": true
+        }
+      ]
+    }
+  ]
+}

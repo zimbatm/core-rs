@@ -1,0 +1,259 @@
+{
+  "segment_size": 65536,
+  "objects": [
+    {
+      "key": "0109c4ed5e13617c5a03d21e91b91ab327d134ff007057121d2cbed350347aeb",
+      "payload": {
+        "kind": "splitmix",
+        "seed": 3000,
+        "len": 2500
+      }
+    },
+    {
+      "key": "010da947b7e25d152031b8a1d4ee7b38a63bbe89d858f2b3d71d54558dc7b214",
+      "payload": {
+        "kind": "splitmix",
+        "seed": 3001,
+        "len": 3497
+      }
+    },
+    {
+      "key": "01118efab2d8dbc31b6299335955225990bf1d840ee88a9e9ccd1018d3180536",
+      "payload": {
+        "kind": "splitmix",
+        "seed": 3002,
+        "len": 4494
+      }
+    },
+    {
+      "key": "014e4727b9435296d1d9404f883aff2f80ee19ee59392505e2e2de596922cf2e",
+      "payload": {
+        "kind": "const",
+        "byte": 67,
+        "len": 20039
+      }
+    },
+    {
+      "key": "0119582f858c78a09b9363581f50780d47b430a45cc3d8d2a0c0f99f01c8c548",
+      "payload": {
+        "kind": "splitmix",
+        "seed": 3004,
+        "len": 6488
+      }
+    },
+    {
+      "key": "011d3d4849d850e7dcba16bedcb6f0542dcdb59e8a8bd53534fc60a1c29d5a71",
+      "payload": {
+        "kind": "splitmix",
+        "seed": 3005,
+        "len": 7485
+      }
+    },
+    {
+      "key": "012122e3ec530c66e78748c780f47c8066429c02e68642bb4fa86bbbdcf51076",
+      "payload": {
+        "kind": "splitmix",
+        "seed": 3006,
+        "len": 8482
+      }
+    },
+    {
+      "key": "010d97332de678ac382d92dcdceec00073619a46e61ab6fb21109cc22bf56539",
+      "payload": {
+        "kind": "splitmix",
+        "seed": 3007,
+        "len": 3479
+      }
+    },
+    {
+      "key": "01117c8f4c91c2d8b74bdd0c936a6733dfbcd97c81d56c7c67dd1b310b90aead",
+      "payload": {
+        "kind": "splitmix",
+        "seed": 3008,
+        "len": 4476
+      }
+    },
+    {
+      "key": "011561ae290e395e85c956175fc9e71cc6ad9d55e616d3c577fa075cdef44660",
+      "payload": {
+        "kind": "splitmix",
+        "seed": 3009,
+        "len": 5473
+      }
+    },
+    {
+      "key": "014ea22537c3e7b264627fc6d32be99d3d99bc32ab80a5a80d19a52c561bcfeb",
+      "payload": {
+        "kind": "const",
+        "byte": 74,
+        "len": 20130
+      }
+    },
+    {
+      "key": "011d2bbab4b32e6393c720545dd47fe7e0a3fa16d4c09b97b868fdc28d67da65",
+      "payload": {
+        "kind": "splitmix",
+        "seed": 3011,
+        "len": 7467
+      }
+    },
+    {
+      "key": "0121102a7b3e37910f02a6e7ff6a68cd2b8353d2d1f341137f9d230cf0b2d5d8",
+      "payload": {
+        "kind": "splitmix",
+        "seed": 3012,
+        "len": 8464
+      }
+    },
+    {
+      "key": "010d85f8be61e7f8cfe051e50a5113f058cd7d0b5676edbaf4ca84c2fbbe64fb",
+      "payload": {
+        "kind": "splitmix",
+        "seed": 3013,
+        "len": 3461
+      }
+    },
+    {
+      "key": "01116a81a53e91325ff95b01a65b0ff933acc19dd614fd28b062775955671b3e",
+      "payload": {
+        "kind": "splitmix",
+        "seed": 3014,
+        "len": 4458
+      }
+    },
+    {
+      "key": "01154facf78c36ff733d073eb045a551be1d7a1e43ee8cf48779c40b8d63776f",
+      "payload": {
+        "kind": "splitmix",
+        "seed": 3015,
+        "len": 5455
+      }
+    },
+    {
+      "key": "011934835b5bc2c77ec44ab62876d698e240927c72ce4a0928aa9c4328f50bea",
+      "payload": {
+        "kind": "splitmix",
+        "seed": 3016,
+        "len": 6452
+      }
+    },
+    {
+      "key": "014efd63c6d1be423740e3c9f9dd0a2f58ec71da6cb3c386f81e9b0bf975611f",
+      "payload": {
+        "kind": "const",
+        "byte": 81,
+        "len": 20221
+      }
+    },
+    {
+      "key": "0120fe0714b495cb70c9eb1bf9e78d247bf6f607af5b945e0a4530a8f0b4f404",
+      "payload": {
+        "kind": "splitmix",
+        "seed": 3018,
+        "len": 8446
+      }
+    },
+    {
+      "key": "010d730a0363cc770788ae004b6d35b98e26935b788ab5526ea1c104fc9387c1",
+      "payload": {
+        "kind": "splitmix",
+        "seed": 3019,
+        "len": 3443
+      }
+    },
+    {
+      "key": "011158e34bb972c4a4d5beb0731f46dc500546996e418ffddad43d2a7384e14a",
+      "payload": {
+        "kind": "splitmix",
+        "seed": 3020,
+        "len": 4440
+      }
+    },
+    {
+      "key": "01153d72e4e176f72df9b43da1631d1f79a3b09fbb7165e8e36260224e56ae74",
+      "payload": {
+        "kind": "splitmix",
+        "seed": 3021,
+        "len": 5437
+      }
+    },
+    {
+      "key": "01192212a2281e52cee3203275f118af8c7084f7c3ed8ed5c196cdd09bce6496",
+      "payload": {
+        "kind": "splitmix",
+        "seed": 3022,
+        "len": 6434
+      }
+    },
+    {
+      "key": "011d07c9c26ab8dd680e7abbcd76ce087e490d79719f2912ace96644776a8728",
+      "payload": {
+        "kind": "splitmix",
+        "seed": 3023,
+        "len": 7431
+      }
+    },
+    {
+      "key": "014f58d6ac5a700fbedb4e75e8f1ee0e0570829aa47069ac857d4567e6f423ac",
+      "payload": {
+        "kind": "const",
+        "byte": 88,
+        "len": 20312
+      }
+    },
+    {
+      "key": "010d61de9b7108ce07fee8d0846cb2574ac6ef04ba7e210c63b48540238358f8",
+      "payload": {
+        "kind": "splitmix",
+        "seed": 3025,
+        "len": 3425
+      }
+    },
+    {
+      "key": "011146db58d08666db566c93dcf0da560637765370510ea0015b2eea5d1ea5d6",
+      "payload": {
+        "kind": "splitmix",
+        "seed": 3026,
+        "len": 4422
+      }
+    },
+    {
+      "key": "01152b4bdecb69307304fc27ccb62b56c6e4e8cc496fc4cbadc434cc5d4ee425",
+      "payload": {
+        "kind": "splitmix",
+        "seed": 3027,
+        "len": 5419
+      }
+    },
+    {
+      "key": "0103e8d7791e929885f39e6a7fa948ff83d836f0cdf95c23a14ac48e6a8fbd71",
+      "payload": {
+        "kind": "splitmix",
+        "seed": 4000,
+        "len": 1000
+      }
+    },
+    {
+      "key": "0104b0cfcd01b4772a0515a5d33143c2a4e2afa44a7a6ab0f3a061f103f80e8d",
+      "payload": {
+        "kind": "splitmix",
+        "seed": 4001,
+        "len": 1200
+      }
+    },
+    {
+      "key": "010578f53eb0a9c890ad8e13845ad44ccbd1bc1e725cc780c29e58701db70abc",
+      "payload": {
+        "kind": "splitmix",
+        "seed": 4002,
+        "len": 1400
+      }
+    }
+  ],
+  "absent": [
+    "000b0892d27bfb8c10cb16682d273cf603114888f0b4bcc70a8f36a211017966",
+    "00161b4119cca6802dc73a50529d2036da5b04bb472eb6b833462f9706b5a96c",
+    "00212052af50eb4057aabd67f3d3d64b03847480d1ef0e985877789aff21f4a8",
+    "002cb5eafc027c4f64041cbcb91d2dbeab3059d42734640ee2a5a6d39e48ff51"
+  ]
+}
