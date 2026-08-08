@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# Live Go <-> Rust interoperability check.
+#
+# Requires a checkout of the Go implementation (github.com/jobs-build/amber-store-core)
+# at $AMBER_GO_REPO (default: ../amber-store-core) with the Go toolchain available,
+# and cargo for this repository.
+#
+# Verifies, on a freshly created tree:
+#   1. identical ingest root keys from both implementations;
+#   2. each implementation reads the store directory the OTHER one wrote
+#      (ls output byte-identical, export tars byte-identical);
+#   3. a Rust restore of the Go-written store re-ingests (with Go) to the
+#      same root key.
+set -euo pipefail
+
+RS_REPO="$(cd "$(dirname "$0")/.." && pwd)"
+GO_REPO="${AMBER_GO_REPO:-$RS_REPO/../amber-store-core}"
+[ -d "$GO_REPO/cmd/amber-store" ] || {
+  echo "Go implementation not found at $GO_REPO (set AMBER_GO_REPO)" >&2
+  exit 1
+}
+
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+
+echo "== building CLIs"
+(cd "$RS_REPO" && cargo build -q --example amber-store)
+RS="$RS_REPO/target/debug/examples/amber-store"
+(cd "$GO_REPO" && go build -o "$WORK/amber-store-go" ./cmd/amber-store)
+GO="$WORK/amber-store-go"
+
+echo "== creating test tree"
+T="$WORK/tree"
+mkdir -p "$T/docs/deep/deeper" "$T/logs"
+printf 'hello amber\n' > "$T/hello.txt"
+head -c 3000000 /dev/urandom > "$T/big.bin"        # multi-chunk, multi-level index
+touch "$T/empty"
+printf 'x' > "$T/one-byte"
+ln -s ../hello.txt "$T/docs/link"
+printf 'nested content\n' > "$T/docs/deep/deeper/leaf.txt"
+printf 'keep\n' > "$T/logs/keep.log"
+printf 'drop\n' > "$T/logs/drop.tmp"
+printf '*.tmp\n' > "$T/.amberignore"
+mkfifo "$T/fifo"
+touch -t 200001020304.05 "$T/docs/deep/deeper/leaf.txt"
+if command -v xattr >/dev/null 2>&1; then
+  xattr -w user.check interop "$T/hello.txt" 2>/dev/null || true
+fi
+
+echo "== ingest with both implementations"
+ROOT_GO=$("$GO" --store "$WORK/store-go" ingest "$T")
+ROOT_RS=$("$RS" --store "$WORK/store-rs" ingest "$T")
+echo "   go:   $ROOT_GO"
+echo "   rust: $ROOT_RS"
+[ "$ROOT_GO" = "$ROOT_RS" ] || { echo "FAIL: root keys differ" >&2; exit 1; }
+
+echo "== cross-reading each other's stores (ls)"
+"$GO" --store "$WORK/store-go" ls --keys "$ROOT_GO" > "$WORK/ls-go-own.txt"
+"$RS" --store "$WORK/store-go" ls --keys "$ROOT_GO" > "$WORK/ls-rs-cross.txt"
+cmp "$WORK/ls-go-own.txt" "$WORK/ls-rs-cross.txt"
+"$RS" --store "$WORK/store-rs" ls --keys "$ROOT_RS" > "$WORK/ls-rs-own.txt"
+"$GO" --store "$WORK/store-rs" ls --keys "$ROOT_RS" > "$WORK/ls-go-cross.txt"
+cmp "$WORK/ls-rs-own.txt" "$WORK/ls-go-cross.txt"
+
+echo "== cross-exporting (tar byte-compare, 4 combinations)"
+"$GO" --store "$WORK/store-go" export -o "$WORK/go-from-go.tar" "$ROOT_GO"
+"$RS" --store "$WORK/store-go" export -o "$WORK/rs-from-go.tar" "$ROOT_GO"
+"$RS" --store "$WORK/store-rs" export -o "$WORK/rs-from-rs.tar" "$ROOT_RS"
+"$GO" --store "$WORK/store-rs" export -o "$WORK/go-from-rs.tar" "$ROOT_RS"
+cmp "$WORK/go-from-go.tar" "$WORK/rs-from-go.tar"
+cmp "$WORK/go-from-go.tar" "$WORK/rs-from-rs.tar"
+cmp "$WORK/go-from-go.tar" "$WORK/go-from-rs.tar"
+
+echo "== restore (rust, from the go store) -> re-ingest (go) -> same root"
+"$RS" --store "$WORK/store-go" restore "$ROOT_GO" "$WORK/restored"
+ROOT_AGAIN=$("$GO" --store "$WORK/store-check" ingest "$WORK/restored")
+[ "$ROOT_GO" = "$ROOT_AGAIN" ] || { echo "FAIL: restored tree re-ingests to $ROOT_AGAIN" >&2; exit 1; }
+
+echo "== refs (per-implementation; DB formats intentionally differ, see PORTING.md)"
+"$RS" --store "$WORK/store-rs" ref set nightly "$ROOT_RS"
+[ "$("$RS" --store "$WORK/store-rs" ref get nightly)" = "$ROOT_RS" ]
+"$RS" --store "$WORK/store-rs" ls "ref:nightly@docs" > /dev/null
+
+echo "OK: all interop checks passed"
