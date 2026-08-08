@@ -16,9 +16,6 @@
 
       devShells = eachSystem (system: pkgs: {
         default = pkgs.mkShell {
-          shellHook = ''
-            # Set here the env vars you want to be available in the shell
-          '';
           hardeningDisable = [ "all" ];
 
           # go regenerates the golden vectors (tools/vectorgen)
