@@ -11,12 +11,19 @@
 //! frames differ, so segment *files* are not byte-identical run-to-run, but
 //! each side reads the other's).
 
+mod barrier;
+mod compact;
 mod footer;
+mod gc;
+mod markset;
 mod missing;
 mod parallel;
 mod recover;
 mod verify;
 
+pub use compact::{CompactOpts, CompactStats, SegmentLiveness};
+pub use gc::SegmentInfo;
+pub use markset::MarkSet;
 pub use parallel::{DEFAULT_BATCH_SIZE, WriteOpts, WriteStats};
 
 use std::collections::{HashMap, HashSet};
@@ -25,6 +32,7 @@ use std::io;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 
 use crate::amberpack::{self, REC_HEADER_SIZE, decode_payload, encode_record};
@@ -79,6 +87,10 @@ pub enum Error {
     /// The store has been closed (Go: `ErrClosed`).
     #[error("packstore: store closed")]
     Closed,
+    /// The id names no sealed segment — never sealed, or already removed
+    /// (Go: `ErrUnknownSegment`).
+    #[error("packstore: no such segment")]
+    UnknownSegment,
     /// Structural corruption: bad record framing, bad footer, scrub findings
     /// (Go: `ErrCorrupt`, which aliases `amberpack.ErrCorrupt` — `msg` holds
     /// the complete diagnostic text, including that prefix where Go's
@@ -146,6 +158,15 @@ impl Error {
         match self {
             Error::Closed => true,
             Error::Context { source, .. } => source.is_closed(),
+            _ => false,
+        }
+    }
+
+    /// Go's `errors.Is(err, ErrUnknownSegment)`.
+    pub fn is_unknown_segment(&self) -> bool {
+        match self {
+            Error::UnknownSegment => true,
+            Error::Context { source, .. } => source.is_unknown_segment(),
             _ => false,
         }
     }
@@ -263,6 +284,15 @@ pub struct Store {
     cfg: Options,
     append: Mutex<AppendState>,
     shared: RwLock<Shared>,
+
+    /// Write-barrier grey capture (Go: `capturing`/`greyMu`/`grey`; see
+    /// barrier.rs). `capturing` is a lock-free fast path; the authoritative
+    /// state is the `Option` under the mutex.
+    capturing: AtomicBool,
+    grey: Mutex<Option<HashSet<Key>>>,
+
+    /// In-flight exported-write starts (Go: `writesMu`/`writes`; see gc.rs).
+    writes: Mutex<gc::Writes>,
 }
 
 impl std::fmt::Debug for Store {
@@ -427,6 +457,9 @@ impl Store {
                 closed: false,
                 failed: None,
             }),
+            capturing: AtomicBool::new(false),
+            grey: Mutex::new(None),
+            writes: Mutex::new(gc::Writes::new()),
         })
     }
 
@@ -478,6 +511,19 @@ impl Store {
     /// seals the segment if it reached the rotation threshold (Go: `append`).
     fn append(&self, k: Key, rec: &[u8], sync_now: bool) -> Result<(), Error> {
         let mut ap = self.append_lock();
+        self.append_locked(&mut ap, k, rec, sync_now)
+    }
+
+    /// [`Store::append`]'s body. The caller must hold the append lock (Go:
+    /// `appendLocked`; [`Store::compact`]'s appender calls it directly since
+    /// it already holds the lock).
+    fn append_locked(
+        &self,
+        ap: &mut AppendState,
+        k: Key,
+        rec: &[u8],
+        sync_now: bool,
+    ) -> Result<(), Error> {
         {
             let sh = unpoison(self.shared.read());
             if sh.closed {
@@ -488,7 +534,7 @@ impl Store {
             }
         }
         if ap.active.is_none() {
-            self.create_active(&mut ap)?;
+            self.create_active(ap)?;
         }
         let Some(aw) = ap.active.as_mut() else {
             return Err(Error::Closed); // unreachable: create_active succeeded
@@ -523,7 +569,7 @@ impl Store {
             // reads stay correct (the fd is still open), but accepting
             // further writes could append past a footer. Poison the write
             // path; reopen recovers cleanly.
-            if let Err(e) = self.seal_active(&mut ap) {
+            if let Err(e) = self.seal_active(ap) {
                 self.set_failed(&e);
                 return Err(e);
             }
@@ -627,6 +673,7 @@ impl Store {
         I: IntoIterator<Item = Result<Object, E>>,
         E: std::error::Error + Send + Sync + 'static,
     {
+        let _write_token = self.begin_write();
         let mut seen: HashSet<Key> = HashSet::new();
         let mut appended = false;
         let fail = |appended: bool, err: Error| -> Error {
@@ -643,6 +690,9 @@ impl Store {
             if !seen.insert(obj.key) {
                 continue;
             }
+            // Observe before the dedup check: a barrier capture must grey
+            // dedup hits too (a hit in a condemned pack is otherwise lost).
+            self.observe(obj.key);
             let has = match self.has(obj.key) {
                 Ok(h) => h,
                 Err(e) => {
@@ -675,12 +725,16 @@ impl Store {
     /// record was appended by a still-running batch, its durability rides on
     /// that batch's commit (Go: `Put`).
     pub fn put(&self, k: Key, data: &[u8]) -> Result<(), Error> {
+        let _write_token = self.begin_write();
         {
             let sh = unpoison(self.shared.read());
             if let Some(msg) = &sh.failed {
                 return Err(Error::Failed(msg.clone()));
             }
         }
+        // Observe before the dedup check: a barrier capture must grey dedup
+        // hits too (a hit in a condemned pack is otherwise lost).
+        self.observe(k);
         if self.has(k)? {
             return Ok(());
         }
@@ -926,6 +980,9 @@ impl Drop for Store {
 
 #[cfg(test)]
 pub(crate) mod testutil;
+
+#[cfg(test)]
+mod gc_tests;
 
 #[cfg(test)]
 mod store_tests;

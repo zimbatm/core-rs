@@ -145,6 +145,15 @@ pub(crate) fn parse_filter_section(b: &[u8]) -> Result<BinaryFuse16, Error> {
 /// Finds `k` in a parsed index section: fanout bucket on the last byte, then
 /// binary search on the full key within the bucket (Go: `searchIndex`).
 pub(crate) fn search_index(fanout: &[u32; 256], entries: &[u8], k: Key) -> Option<(u64, u32)> {
+    let pos = search_index_pos(fanout, entries, k)?;
+    let e = &entries[pos * INDEX_ENTRY_SIZE..(pos + 1) * INDEX_ENTRY_SIZE];
+    let off = u64::from_be_bytes([e[32], e[33], e[34], e[35], e[36], e[37], e[38], e[39]]);
+    Some((off, be_u32(e, 40)))
+}
+
+/// Returns `k`'s entry position within the index section (Go:
+/// `searchIndexPos`).
+pub(crate) fn search_index_pos(fanout: &[u32; 256], entries: &[u8], k: Key) -> Option<usize> {
     let b = k.as_bytes()[key::SIZE - 1];
     let lo = if b > 0 { fanout[b as usize - 1] } else { 0 } as usize;
     let n = fanout[b as usize] as usize - lo;
@@ -162,12 +171,11 @@ pub(crate) fn search_index(fanout: &[u32; 256], entries: &[u8], k: Key) -> Optio
     if low >= n {
         return None;
     }
-    let e = row(low);
-    if e[..32] != k.as_bytes()[..] {
+    let pos = lo + low;
+    if entries[pos * INDEX_ENTRY_SIZE..pos * INDEX_ENTRY_SIZE + 32] != k.as_bytes()[..] {
         return None;
     }
-    let off = u64::from_be_bytes([e[32], e[33], e[34], e[35], e[36], e[37], e[38], e[39]]);
-    Some((off, be_u32(e, 40)))
+    Some(pos)
 }
 
 /// Assembles the complete footer (seal marker, index section, filter section,
@@ -224,6 +232,13 @@ impl FooterView {
     pub(crate) fn lookup(&self, image: &[u8], k: Key) -> Option<(u64, u32)> {
         let entries = &image[self.entries_off..self.entries_off + self.entries_len];
         search_index(&self.fanout, entries, k)
+    }
+
+    /// Finds `k`'s position in the segment's index — the mark-set bit slot
+    /// for the record (Go: `footerView.lookupPos`; see markset.rs).
+    pub(crate) fn lookup_pos(&self, image: &[u8], k: Key) -> Option<usize> {
+        let entries = &image[self.entries_off..self.entries_off + self.entries_len];
+        search_index_pos(&self.fanout, entries, k)
     }
 }
 

@@ -690,21 +690,31 @@ where
     Ok(out)
 }
 
-/// Verifies that every object reachable from `root` exists. The tree is
-/// walked breadth-first, checking each level's objects with up to `jobs`
-/// concurrent lookups (`jobs == 0` means the available parallelism, like
-/// Go's `jobs <= 0` ⇒ GOMAXPROCS): interior nodes are read with `get` — a
-/// failed read surfaces as [`WalkError::Read`] wrapping the get error — and
-/// Blob and XattrSet leaves are tested with `has` — an absent leaf surfaces
-/// as [`WalkError::Missing`]. Each object is checked once even when
-/// referenced repeatedly. `get` and `has` must be safe for concurrent use.
-pub fn check_complete<G, H, E>(root: Key, get: G, has: H, jobs: usize) -> Result<(), WalkError<E>>
+/// Verifies that every object reachable from `root` exists and returns the
+/// visited keys — root first, then discovery order (per BFS level, in each
+/// parent's child order), each key exactly once even when referenced
+/// repeatedly (Go: `CheckComplete`). The tree is walked breadth-first,
+/// checking each level's objects with up to `jobs` concurrent lookups
+/// (`jobs == 0` means the available parallelism, like Go's `jobs <= 0` ⇒
+/// GOMAXPROCS): interior nodes are read with `get` — a failed read surfaces
+/// as [`WalkError::Read`] wrapping the get error — and Blob and XattrSet
+/// leaves are tested with `has` — an absent leaf surfaces as
+/// [`WalkError::Missing`]. On error there is no partial list — `Err` is
+/// returned (Go returns a nil visited list). `get` and `has` must be safe
+/// for concurrent use.
+pub fn check_complete<G, H, E>(
+    root: Key,
+    get: G,
+    has: H,
+    jobs: usize,
+) -> Result<Vec<Key>, WalkError<E>>
 where
     G: Fn(Key) -> Result<Vec<u8>, E> + Sync,
     H: Fn(Key) -> Result<bool, E> + Sync,
     E: Send,
 {
     let jobs = if jobs == 0 { default_jobs() } else { jobs };
+    let mut visited = vec![root];
     let mut seen: HashSet<Key> = HashSet::from([root]);
     let mut frontier = vec![root];
 
@@ -725,13 +735,14 @@ where
         for children in results {
             for ck in children? {
                 if seen.insert(ck) {
+                    visited.push(ck);
                     next.push(ck);
                 }
             }
         }
         frontier = next;
     }
-    Ok(())
+    Ok(visited)
 }
 
 /// The default worker count for the parallel walks (Go: `GOMAXPROCS`).
@@ -1504,9 +1515,28 @@ mod tests {
         let objs = complete_tree();
         let root = objs.last().unwrap().key;
         let store = MemStore::of(&objs.iter().collect::<Vec<_>>());
-        check_complete(root, store.get(), store.has(), 4).unwrap();
-        check_complete(root, store.get(), store.has(), 0).unwrap();
-        check_complete(root, store.get(), store.has(), 1).unwrap();
+        let visited = check_complete(root, store.get(), store.has(), 4).unwrap();
+        assert_eq!(visited.len(), objs.len(), "visited count");
+        assert_eq!(visited[0], root, "visited[0] must be the root");
+        let want: HashSet<Key> = objs.iter().map(|o| o.key).collect();
+        let mut seen: HashSet<Key> = HashSet::new();
+        for k in &visited {
+            assert!(seen.insert(*k), "key {k} visited twice");
+            assert!(want.contains(k), "unexpected visited key {k}");
+        }
+        for k in &want {
+            assert!(seen.contains(k), "key {k} not visited");
+        }
+        // The list is deterministic (results are indexed by frontier
+        // position), so every jobs setting yields the same order.
+        assert_eq!(
+            check_complete(root, store.get(), store.has(), 0).unwrap(),
+            visited
+        );
+        assert_eq!(
+            check_complete(root, store.get(), store.has(), 1).unwrap(),
+            visited
+        );
     }
 
     #[test]

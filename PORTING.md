@@ -1,7 +1,7 @@
 # Porting contract (Go → Rust)
 
 This crate is a port of `github.com/jobs-build/amber-store-core` (Go), pinned
-at commit `e4fcb60cba49520a9ceeea266948bbaed9125837`. The Go sources are the
+at commit `a2ff135cd1c94bdd04c9eca4c5019062eb4dbe81`. The Go sources are the
 normative reference wherever this document or `architecture/` is silent; a
 local checkout lives at `/Users/dragan/jobs-build/amber-store-core`.
 
@@ -147,7 +147,9 @@ length-field arithmetic per `architecture/types.md`. Read paths: `ChildKeys`,
 `CollectEntries`, `LookupEntry` (DirNode binary search), `ListEntries`
 (after/limit pagination), `WriteContent`, `ReachableKeys`, `CheckComplete`
 (bounded-parallel walk; a sequential or scoped-thread implementation is fine
-if observable behavior matches).
+if observable behavior matches). `check_complete` returns the visited keys
+(root first, BFS discovery order, each once; `Err` returns no partial list) —
+the collector hands them to the write barrier.
 
 ### `amberpack` (Go: `amberpack/`)
 
@@ -173,12 +175,36 @@ before commit, stats). Match fsync/rename durability discipline. Concurrency:
 scoped threads + channels; observable semantics (dedup, stats, error-stops)
 must match Go.
 
+GC surface (Go: `markset.go`, `barrier.go`, `gc.go`, `compact.go` →
+`markset.rs`, `barrier.rs`, `gc.rs`, `compact.rs`): the mark-set bitmaps over
+footer index positions, the write barrier's grey capture (observe *before*
+the dedup `has` — dedup hits must grey), segment listing/scan/record/
+re-append/remove, and `compact` (seal, strict-mtime-before-horizon victim
+selection, parallel re-verify + single appender under the append lock,
+unlink only after durable copies). Deviations from Go's scrub-wait and
+write-token machinery are documented in `port-notes/packstore-gc.md` —
+Rust's `Arc`-held mmaps make Go's munmap-wait unnecessary.
+
 ### `refstore` (Go: `refstore/`)
 
 Semantic port on redb (see contract above). Same validation and API shape:
 put/get/delete/list (lexicographic), records stored verbatim, `sync` flag
 honored (redb durability settings). Read `refstore.go` for exact behaviors
 (missing-name errors, empty-store list, etc.).
+
+### `gc` (Go: `gc/`)
+
+The mark-and-sweep collector of `architecture/mark-sweep-gc.md`: mark from
+the references' roots into a `packstore` mark set, sweep via `compact`.
+Port `gc.go`/`collector.go`/`cycle.go`/`status.go` exactly: the cycle's
+lock/barrier order (barrier on, then the roots snapshot, both under the
+exclusive reference lock; `abort_barrier` on every early exit; the sweep
+again under the exclusive lock), `prepare_ref`'s guard held from the
+completeness walk to commit/abort, the no-op `release_ref` kept for
+protocol parity, policy thresholds (0.5, or 0.1 under min-free pressure
+probed at the closures dir), and the loud mark abort on a missing object.
+Go's contexts/goroutines map to cancel flags + threads; see
+`port-notes/gc.md`.
 
 ### `reference` (Go: `reference/`)
 
@@ -223,6 +249,16 @@ dir mtimes applied after children, path-safety checks).
 
 ### CLI example (`examples/amber-store.rs`)
 
-Dev-only mirror of `cmd/amber-store` (ingest/ls/export/restore/ref, --store,
-ref:NAME[@PATH] addressing) for interop testing; uses only the public crate
-API + clap. No progress UI needed.
+Dev-only mirror of `cmd/amber-store` (ingest/ls/export/restore/ref/gc,
+--store, --segment-size, ref:NAME[@PATH] addressing) for interop testing;
+uses only the public crate API + clap. No progress UI needed. The gc
+subcommands' output format strings are byte-compatible with Go (the bench
+and tests parse them); reference writes route through the collector.
+
+### bench example (`examples/amber-bench.rs`)
+
+Port of `cmd/amber-bench`, the ingest → delete → gc benchmark. The dataset
+generator reproduces Go's byte streams exactly (Go `math/rand/v2` PCG +
+`IntN`/`Shuffle`, xorshift64* file content) so both implementations ingest
+the identical dataset; results.json is schema-compatible with Go's. See
+`port-notes/amber-bench.md`.

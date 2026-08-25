@@ -10,7 +10,7 @@ use std::thread;
 use tempfile::TempDir;
 
 use crate::amberpack::{REC_HEADER_SIZE, encode_record};
-use crate::binaryfuse::BinaryFuse16;
+use crate::binaryfuse::{BinaryFuse16, SECTION_HEADER_SIZE};
 use crate::key::{Key, Type};
 
 use super::footer::{
@@ -1129,6 +1129,22 @@ fn parse_filter_section_rejects_bad_geometry() {
         b[9..13].copy_from_slice(&0u32.to_be_bytes());
         b[13..17].copy_from_slice(&0xFFFF_FFFFu32.to_be_bytes());
     });
+    // segCount == 0 (with segCountLen == 0 and fpCount == 2*segLen) satisfies
+    // every other geometry identity, so it needs its own rejection; the
+    // crafted geometry previously made Go's xorfilter Contains panic with
+    // index-out-of-range on first lookup (Go adds a dedicated first case in
+    // parseFilterSection; the Rust binaryfuse parser already refused it —
+    // this pins the behavior) (Go: the "segCount zero" subtest).
+    {
+        let seg_len = super::be_u32(&sec, 9);
+        let fp_count = 2 * seg_len;
+        let mut bad = sec[..SECTION_HEADER_SIZE + 2 * fp_count as usize].to_vec();
+        bad[17..21].copy_from_slice(&0u32.to_be_bytes()); // segCount
+        bad[21..25].copy_from_slice(&0u32.to_be_bytes()); // segCountLen
+        bad[25..29].copy_from_slice(&fp_count.to_be_bytes());
+        let err = parse_filter_section(&bad).unwrap_err();
+        assert!(err.is_corrupt(), "segCount zero: want corrupt, got {err}");
+    }
 }
 
 #[test]
@@ -1419,8 +1435,8 @@ fn scan_active_valid_footer_with_trailing_garbage() {
 // Scrub tests (Go: verify_test.go).
 
 /// Builds a store with sealed segments and returns its dir (Go:
-/// `sealedStore`).
-fn sealed_store(objs: &[Object]) -> TempDir {
+/// `sealedStore`; also the GC tests' `gcStore` substrate — see gc_tests.rs).
+pub(crate) fn sealed_store(objs: &[Object]) -> TempDir {
     let dir = TempDir::new().unwrap();
     let s = Store::open_with(dir.path(), Options::default().segment_size(8 << 10)).unwrap();
     for o in objs {
