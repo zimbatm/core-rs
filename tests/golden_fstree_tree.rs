@@ -644,8 +644,21 @@ fn golden_tree_check_complete() {
     let Some(g) = GOLDEN.as_ref() else { return };
 
     let has = |k: Key| Ok::<bool, String>(g.built.contains_key(&k));
-    check_complete(g.root, g.get(), has, 0).unwrap();
-    check_complete(g.root, g.get(), has, 4).unwrap();
+    // The visited keys come back root first, then discovery order, each key
+    // exactly once — the whole manifest set (Go TestCheckComplete_CompleteTree
+    // asserts count, root-first, no duplicates, and set equality).
+    let visited = check_complete(g.root, g.get(), has, 0).unwrap();
+    assert_eq!(visited.len(), g.golden.len(), "visited count");
+    assert_eq!(visited[0], g.root, "root first");
+    let set: HashSet<Key> = visited.iter().copied().collect();
+    assert_eq!(set.len(), visited.len(), "no duplicates");
+    let want: HashSet<Key> = g.golden.keys().copied().collect();
+    assert_eq!(
+        set, want,
+        "visited keys must cover exactly the manifest set"
+    );
+    // Deterministic regardless of the jobs setting.
+    assert_eq!(check_complete(g.root, g.get(), has, 4).unwrap(), visited);
 
     // Delete one leaf object (the empty Blob, shared by "empty" and the 60
     // empty bigdir files): check_complete must name it missing.

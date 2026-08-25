@@ -112,6 +112,7 @@ impl Store {
         I::IntoIter: Send,
         E: std::error::Error + Send + Sync + 'static,
     {
+        let _write_token = self.begin_write();
         let writers = if opts.writers == 0 {
             thread::available_parallelism().map_or(1, |n| n.get())
         } else {
@@ -198,6 +199,10 @@ impl Store {
                 Ok(o) => o,
                 Err(_) => break, // channel closed: input exhausted
             };
+            // Observe before the per-writer dedup: a barrier capture must
+            // grey dedup hits too. Cross-writer duplicates may be observed
+            // more than once — harmless, the grey set is a set.
+            self.observe(obj.key);
             if !run.seen.add_if_absent(obj.key) {
                 run.deduped.fetch_add(1, Ordering::Relaxed);
                 continue;

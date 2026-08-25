@@ -600,10 +600,12 @@ impl BinaryFuse16 {
         out[21..25].copy_from_slice(&self.segment_count_length.to_be_bytes());
         out[25..29].copy_from_slice(&(self.fingerprints.len() as u32).to_be_bytes());
         for (chunk, fp) in out[SECTION_HEADER_SIZE..]
-            .chunks_exact_mut(2)
+            .as_chunks_mut::<2>()
+            .0
+            .iter_mut()
             .zip(&self.fingerprints)
         {
-            chunk.copy_from_slice(&fp.to_be_bytes());
+            *chunk = fp.to_be_bytes();
         }
         out
     }
@@ -661,8 +663,10 @@ impl BinaryFuse16 {
             segment_count: seg_count,
             segment_count_length: seg_count_len,
             fingerprints: b[SECTION_HEADER_SIZE..]
-                .chunks_exact(2)
-                .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| u16::from_be_bytes(*c))
                 .collect(),
         })
     }

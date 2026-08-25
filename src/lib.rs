@@ -16,6 +16,7 @@
 //! | [`binaryfuse`] | Binary fuse filter (16-bit), bit-compatible with FastFilter/xorfilter. |
 //! | [`fstree`] | Tree objects, bottom-up builders, and read paths. |
 //! | [`amberignore`] | `.gitignore`-semantics exclusion for ingestion. |
+//! | [`gc`] | Mark-and-sweep garbage collection: mark from the references, sweep by rewriting mostly-dead packs. |
 //! | [`amberpack`] | The flat pack stream format: records + wire packs. |
 //! | [`packstore`] | Append-only segment object store. |
 //! | [`refstore`] | Name → reference-record map (redb-backed; see PORTING.md). |
@@ -31,6 +32,7 @@ pub mod binaryfuse;
 pub mod cbor;
 pub mod chunkers;
 pub mod fstree;
+pub mod gc;
 pub mod inbox;
 pub mod ingest;
 pub mod key;

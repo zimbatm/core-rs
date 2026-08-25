@@ -7,13 +7,15 @@
 use std::fs;
 use std::io::{self, Seek as _, SeekFrom, Write as _};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::{Args, Parser, Subcommand};
 
 use amber_store_core::chunkers::ByteOpts;
 use amber_store_core::fstree::{self, Entry};
+use amber_store_core::gc;
 use amber_store_core::ingest;
 use amber_store_core::key::Key;
 use amber_store_core::packstore;
@@ -38,6 +40,13 @@ struct Cli {
     /// $AMBER_STORE
     #[arg(long, global = true)]
     store: Option<String>,
+    /// pack segment size in bytes; the reaping granularity
+    #[arg(
+        long = "segment-size",
+        global = true,
+        default_value_t = packstore::DEFAULT_SEGMENT_SIZE
+    )]
+    segment_size: u64,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -59,6 +68,9 @@ enum Cmd {
     /// manage references: named pointers to root keys
     #[command(subcommand)]
     Ref(RefCmd),
+    /// garbage collection: score packs, reap the mostly-dead ones
+    #[command(subcommand)]
+    Gc(GcCmd),
 }
 
 #[derive(Args)]
@@ -132,6 +144,43 @@ enum RefCmd {
     Rm { name: String },
 }
 
+#[derive(Subcommand)]
+enum GcCmd {
+    /// packs: id, sealed, bytes, garbage, eligible; totals; closures;
+    /// union; last cycle
+    Status,
+    /// score now, reap packs above the garbage line
+    Run(GcRunArgs),
+    /// references whose closure holds KEY's tail
+    Why {
+        /// the object key to explain (exactly one)
+        #[arg(value_name = "KEY")]
+        key: Vec<String>,
+    },
+}
+
+#[derive(Args)]
+struct GcRunArgs {
+    /// force the selection line (fraction; default: 0.5, or 0.1 under
+    /// min-free pressure)
+    #[arg(long, default_value_t = -1.0, allow_negative_numbers = true)]
+    garbage: f64,
+    /// minimum age of a sealed pack before it can be reaped
+    #[arg(
+        long,
+        default_value = "1h",
+        value_parser = parse_go_duration,
+        allow_hyphen_values = true
+    )]
+    grace: i64,
+    /// copier bandwidth cap in bytes/s (0 = unlimited)
+    #[arg(long, default_value_t = 0, allow_negative_numbers = true)]
+    rate: i64,
+    /// free-space floor in bytes (0 = 5% of the filesystem)
+    #[arg(long, default_value_t = 0)]
+    min_free: u64,
+}
+
 fn default_jobs() -> usize {
     thread::available_parallelism().map_or(1, |n| n.get())
 }
@@ -144,6 +193,7 @@ fn run() -> Result<(), CliError> {
         Cmd::Export(a) => run_export(&cli, a),
         Cmd::Restore(a) => run_restore(&cli, a),
         Cmd::Ref(r) => run_ref(&cli, r),
+        Cmd::Gc(g) => run_gc(&cli, g),
     }
 }
 
@@ -152,15 +202,16 @@ fn run() -> Result<(), CliError> {
 // ---------------------------------------------------------------------------
 
 struct Stores {
-    objects: packstore::Store,
-    refs: refstore::Store,
+    // Arcs so a collector can share the open stores (Go passes the same
+    // pointers); each underlying store stays single-owner per process.
+    objects: Arc<packstore::Store>,
+    refs: Arc<refstore::Store>,
 }
 
-/// Opens (creating as needed) the store directory named by --store or
-/// $AMBER_STORE: `<dir>/packstore` holds the objects, `<dir>/refs` the
-/// references DB. Stores are single-owner: never open one directory from two
-/// live processes.
-fn open_store(cli: &Cli) -> Result<Stores, CliError> {
+/// Resolves the store directory from --store or $AMBER_STORE (Go:
+/// urfave/cli's EnvVars fallback on the --store flag; `openCollector` reads
+/// the same resolved value).
+fn store_dir(cli: &Cli) -> Result<PathBuf, CliError> {
     let dir = match &cli.store {
         Some(d) => d.clone(),
         None => std::env::var("AMBER_STORE").unwrap_or_default(),
@@ -168,9 +219,21 @@ fn open_store(cli: &Cli) -> Result<Stores, CliError> {
     if dir.is_empty() {
         return Err("no store directory: set --store or $AMBER_STORE".into());
     }
-    let dir = PathBuf::from(dir);
-    let objects =
-        packstore::Store::open_with(dir.join("packstore"), packstore::Options::new().sync(true))?;
+    Ok(PathBuf::from(dir))
+}
+
+/// Opens (creating as needed) the store directory named by --store or
+/// $AMBER_STORE: `<dir>/packstore` holds the objects, `<dir>/refs` the
+/// references DB. Stores are single-owner: never open one directory from two
+/// live processes.
+fn open_store(cli: &Cli) -> Result<Stores, CliError> {
+    let dir = store_dir(cli)?;
+    let objects = packstore::Store::open_with(
+        dir.join("packstore"),
+        packstore::Options::new()
+            .sync(true)
+            .segment_size(cli.segment_size),
+    )?;
     let refs = match refstore::Store::open(dir.join("refs"), true) {
         Ok(r) => r,
         Err(e) => {
@@ -178,14 +241,48 @@ fn open_store(cli: &Cli) -> Result<Stores, CliError> {
             return Err(e.into());
         }
     };
-    Ok(Stores { objects, refs })
+    Ok(Stores {
+        objects: Arc::new(objects),
+        refs: Arc::new(refs),
+    })
 }
 
-/// Closes both halves (the refs DB closes on drop).
+/// Closes both halves (the refs DB closes on drop). A collector opened next
+/// to these stores must be closed — and dropped, releasing its store
+/// handles — first.
 fn close_store(st: Stores) -> Result<(), CliError> {
     drop(st.refs);
     st.objects.close()?;
     Ok(())
+}
+
+/// Opens the collector next to an already-open store pair;
+/// `<dir>/closures` holds the closure files. Close it before
+/// [`close_store`] (Go: `openCollector`).
+fn open_collector(cli: &Cli, st: &Stores, opts: gc::Options) -> Result<gc::Collector, CliError> {
+    Ok(gc::Collector::open(
+        store_dir(cli)?.join("closures"),
+        Arc::clone(&st.objects),
+        Arc::clone(&st.refs),
+        opts,
+    )?)
+}
+
+/// Joins the failures' messages with newlines, mirroring the Go CLI's
+/// `errors.Join(err, coll.Close(), closeStore(...))` teardown shape: every
+/// error is reported, none masks another.
+fn join_errs<const N: usize>(results: [Result<(), CliError>; N]) -> Result<(), CliError> {
+    let mut msgs = Vec::new();
+    for r in results {
+        if let Err(e) = r {
+            msgs.push(e.to_string());
+        }
+    }
+    if msgs.is_empty() {
+        Ok(())
+    } else {
+        Err(msgs.join("\n").into())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -300,8 +397,14 @@ fn run_ingest(cli: &Cli, a: &IngestArgs) -> Result<(), CliError> {
             ..Default::default()
         };
         let put = rec.encode().map_err(CliError::from).and_then(|raw| {
-            st.refs.put(name, &raw)?;
-            Ok(())
+            // The reference is published through the collector, so an
+            // incomplete tree can fail the write — shouldn't happen right
+            // after ingest (Go: runIngest's openCollector + putRef +
+            // coll.Close join).
+            let coll = open_collector(cli, &st, gc::Options::default())?;
+            let res = put_ref(&coll, &st.refs, name, root, &raw);
+            let closed = coll.close().map_err(CliError::from);
+            join_errs([res, closed])
         });
         if let Err(e) = put {
             let _ = close_store(st);
@@ -596,17 +699,31 @@ fn run_ref(cli: &Cli, cmd: &RefCmd) -> Result<(), CliError> {
             };
             let raw = rec.encode()?;
             let st = open_store(cli)?;
-            let res = st.refs.put(name, &raw);
-            let close = close_store(st);
-            res?;
-            close
+            let coll = match open_collector(cli, &st, gc::Options::default()) {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = close_store(st);
+                    return Err(e);
+                }
+            };
+            let res = put_ref(&coll, &st.refs, name, k, &raw);
+            let closed = coll.close().map_err(CliError::from);
+            drop(coll); // release the collector's store handles first
+            join_errs([res, closed, close_store(st)])
         }
         RefCmd::Rm { name } => {
             let st = open_store(cli)?;
-            let res = st.refs.delete(name);
-            let close = close_store(st);
-            res?;
-            close
+            let coll = match open_collector(cli, &st, gc::Options::default()) {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = close_store(st);
+                    return Err(e);
+                }
+            };
+            let res = rm_ref(&coll, &st.refs, name);
+            let closed = coll.close().map_err(CliError::from);
+            drop(coll);
+            join_errs([res, closed, close_store(st)])
         }
     }
 }
@@ -625,6 +742,58 @@ fn ref_list(st: &Stores) -> Result<(), CliError> {
         }
         writeln!(out, "{line}")?;
     }
+    Ok(())
+}
+
+/// Writes a reference under the collector's removal lock: the closure is
+/// reused or walked — a missing object fails the write, naming it — the
+/// record is stored, and an overwritten root is released. This is the
+/// optimistic reference PUT: on a 404 the caller re-sends the missing
+/// objects and retries (Go: `putRef`).
+///
+/// Calls for one name must be serialized by the caller (the one-shot CLI
+/// is); the read-old -> prepare -> put -> release sequence is not atomic
+/// against a concurrent writer of the same name.
+fn put_ref(
+    coll: &gc::Collector,
+    refs: &refstore::Store,
+    name: &str,
+    root: Key,
+    raw: &[u8],
+) -> Result<(), CliError> {
+    let mut old: Option<Key> = None;
+    match refs.get(name) {
+        Ok(prev) => {
+            let prev_ref = Reference::decode(&prev)
+                .map_err(|e| format!("existing reference {name:?}: {e}"))?;
+            let k = Key::parse(&prev_ref.key)
+                .map_err(|e| format!("existing reference {name:?}: {e}"))?;
+            old = Some(k);
+        }
+        Err(e) if e.is_not_found() => {}
+        Err(e) => return Err(e.into()),
+    }
+    let prepared = coll.prepare_ref(root)?;
+    if let Err(e) = refs.put(name, raw) {
+        prepared.abort();
+        return Err(e.into());
+    }
+    prepared.commit();
+    if let Some(old) = old {
+        coll.release_ref(old)?;
+    }
+    Ok(())
+}
+
+/// Deletes a reference and releases its root: the tails leave the union;
+/// the closure file goes if no other name shares the root. No walk (Go:
+/// `rmRef`).
+fn rm_ref(coll: &gc::Collector, refs: &refstore::Store, name: &str) -> Result<(), CliError> {
+    let prev = refs.get(name)?;
+    let rec = Reference::decode(&prev).map_err(|e| format!("reference {name:?}: {e}"))?;
+    let root = Key::parse(&rec.key).map_err(|e| format!("reference {name:?}: {e}"))?;
+    refs.delete(name)?;
+    coll.release_ref(root)?;
     Ok(())
 }
 
@@ -657,4 +826,512 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
     let y = yoe + era * 400 + i64::from(m <= 2);
     (y, m, d)
+}
+
+// ---------------------------------------------------------------------------
+// gc (Go: gc.go; humanBytes from progress.go).
+// ---------------------------------------------------------------------------
+
+fn run_gc(cli: &Cli, cmd: &GcCmd) -> Result<(), CliError> {
+    match cmd {
+        GcCmd::Status => run_gc_status(cli),
+        GcCmd::Run(a) => run_gc_run(cli, a),
+        GcCmd::Why { key } => run_gc_why(cli, key),
+    }
+}
+
+/// Prints the pack table, the totals, and the last cycle (Go:
+/// `runGCStatus`; its defers drop the close errors, and so does this).
+fn run_gc_status(cli: &Cli) -> Result<(), CliError> {
+    let st = open_store(cli)?;
+    let coll = match open_collector(cli, &st, gc::Options::default()) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = close_store(st);
+            return Err(e);
+        }
+    };
+    let res = gc_status_print(&coll);
+    let _ = coll.close();
+    drop(coll);
+    let _ = close_store(st);
+    res
+}
+
+/// The `gc status` report. Go clamps `GarbageBytes`/`FreedBytes` with
+/// `max(x, 0)` before humanizing; the Rust counters are unsigned, so the
+/// clamp has no counterpart.
+fn gc_status_print(coll: &gc::Collector) -> Result<(), CliError> {
+    let status = coll.status()?;
+    let mut w = io::stdout().lock();
+    writeln!(
+        w,
+        "{:<16}  {:<20}  {:>10}  {:>7}  ELIGIBLE",
+        "PACK", "SEALED", "BYTES", "GARBAGE"
+    )?;
+    for p in &status.packs {
+        writeln!(
+            w,
+            "{:016x}  {:<20}  {:>10}  {:>6.1}%  {}",
+            p.id,
+            rfc3339_local(p.sealed),
+            human_bytes(p.body),
+            100.0 * p.garbage,
+            p.eligible
+        )?;
+    }
+    writeln!(
+        w,
+        "live {}, garbage {}; {} refs, {} live objects marked",
+        human_bytes(status.live_bytes),
+        human_bytes(status.garbage_bytes),
+        status.refs,
+        status.marked
+    )?;
+    if let Some(last) = &status.last {
+        writeln!(
+            w,
+            "last cycle: {}, {} packs scored, {} reaped, {} copied, {} freed",
+            rfc3339_local(last.start),
+            last.scored,
+            last.reaped.len(),
+            human_bytes(last.copied_bytes),
+            human_bytes(last.freed_bytes)
+        )?;
+    }
+    if let Some(e) = &status.last_error {
+        writeln!(w, "last cycle error: {e}")?;
+    }
+    Ok(())
+}
+
+/// Runs one cycle and prints its stats line (Go: `runGCRun`).
+fn run_gc_run(cli: &Cli, a: &GcRunArgs) -> Result<(), CliError> {
+    let st = open_store(cli)?;
+    let opts = gc::Options {
+        // A negative --grace clamps to zero; both select the default, as
+        // Go's withDefaults does for Grace <= 0.
+        grace: Duration::from_nanos(a.grace.max(0) as u64),
+        min_free: a.min_free,
+        rate: a.rate,
+        ..Default::default()
+    };
+    let coll = match open_collector(cli, &st, opts) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = close_store(st);
+            return Err(e);
+        }
+    };
+    let res = coll.run(a.garbage).map_err(CliError::from).map(|stats| {
+        println!(
+            "{} packs scored, {} reaped, {} records ({}) copied, {} freed in {} (mark {}, sweep {}; {} objects marked)",
+            stats.scored,
+            stats.reaped.len(),
+            stats.copied_records,
+            human_bytes(stats.copied_bytes),
+            human_bytes(stats.freed_bytes),
+            format_go_duration(round_ms(go_ns(stats.duration))),
+            format_go_duration(round_ms(go_ns(stats.mark_duration))),
+            format_go_duration(round_ms(go_ns(stats.sweep_duration))),
+            stats.marked
+        );
+    });
+    let _ = coll.close();
+    drop(coll);
+    let _ = close_store(st);
+    res
+}
+
+/// Prints the references that keep KEY alive, or "unreferenced" (Go:
+/// `runGCWhy`; an unreferenced key still exits 0).
+fn run_gc_why(cli: &Cli, keys: &[String]) -> Result<(), CliError> {
+    if keys.len() != 1 {
+        return Err(format!(
+            "gc why requires exactly one KEY argument, got {}",
+            keys.len()
+        )
+        .into());
+    }
+    let k = parse_hex_key(&keys[0])?;
+    let st = open_store(cli)?;
+    let coll = match open_collector(cli, &st, gc::Options::default()) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = close_store(st);
+            return Err(e);
+        }
+    };
+    let res = gc_why_print(&coll, k);
+    let _ = coll.close();
+    drop(coll);
+    let _ = close_store(st);
+    res
+}
+
+fn gc_why_print(coll: &gc::Collector, k: Key) -> Result<(), CliError> {
+    let names = coll.why(k)?;
+    let mut w = io::stdout().lock();
+    if names.is_empty() {
+        writeln!(w, "unreferenced")?;
+        return Ok(());
+    }
+    for n in &names {
+        writeln!(w, "{n}")?;
+    }
+    Ok(())
+}
+
+/// Formats n with binary (KiB/MiB/…) units (Go: `humanBytes` in
+/// progress.go — this build has no progress UI, but the gc report reuses
+/// the same helper).
+fn human_bytes(n: u64) -> String {
+    const UNIT: u64 = 1024;
+    if n < UNIT {
+        return format!("{n} B");
+    }
+    const UNITS: [char; 6] = ['K', 'M', 'G', 'T', 'P', 'E'];
+    let (mut div, mut exp) = (UNIT, 0usize);
+    let mut m = n / UNIT;
+    while m >= UNIT {
+        div *= UNIT;
+        exp += 1;
+        m /= UNIT;
+    }
+    let mut val = n as f64 / div as f64;
+    // Promote to the next unit when rounding to one decimal would otherwise
+    // display at the boundary, e.g. 1048575 as "1024.0 KiB" instead of
+    // "1.0 MiB".
+    if val >= 1023.95 && exp < UNITS.len() - 1 {
+        div *= UNIT;
+        exp += 1;
+        val = n as f64 / div as f64;
+    }
+    format!("{val:.1} {}iB", UNITS[exp])
+}
+
+/// Formats a `SystemTime` the way Go renders a local-zone `time.Time` with
+/// `Format(time.RFC3339)`: seconds precision, numeric UTC offset, "Z" when
+/// the offset is zero (Go: the pack `Sealed` mtimes and the cycle `Start`).
+#[allow(clippy::unnecessary_cast)] // tm_gmtoff is i32 on some targets
+fn rfc3339_local(t: SystemTime) -> String {
+    let secs = match t.duration_since(UNIX_EPOCH) {
+        Ok(d) => d.as_secs() as i64,
+        Err(e) => -(e.duration().as_secs() as i64),
+    };
+    let tm = local_tm(secs);
+    let base = format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
+        i64::from(tm.tm_year) + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        tm.tm_hour,
+        tm.tm_min,
+        tm.tm_sec
+    );
+    let off = tm.tm_gmtoff as i64;
+    if off == 0 {
+        return base + "Z";
+    }
+    let (sign, off) = if off < 0 { ('-', -off) } else { ('+', off) };
+    format!("{base}{sign}{:02}:{:02}", off / 3600, (off % 3600) / 60)
+}
+
+// ---------------------------------------------------------------------------
+// Go-compatible durations (Go: time.ParseDuration, Duration.String and
+// Duration.Round, ported so the gc flags parse and the cycle report prints
+// exactly like the Go CLI).
+// ---------------------------------------------------------------------------
+
+/// Parses a Go duration string into nanoseconds: decimal numbers, each with
+/// an optional fraction and a mandatory unit suffix (ns, us/µs/μs, ms, s,
+/// m, h), concatenated like "1m30s"; a leading sign is allowed and bare
+/// numbers other than "0" are rejected (Go: `time.ParseDuration`). Used as
+/// a clap value parser, so the error side is a plain string; the texts
+/// match Go's.
+fn parse_go_duration(orig: &str) -> Result<i64, String> {
+    let invalid = || format!("time: invalid duration {orig:?}");
+    let mut s = orig;
+    let mut d: u64 = 0;
+    // Consume [-+]?
+    let mut neg = false;
+    if let Some(&c) = s.as_bytes().first()
+        && (c == b'-' || c == b'+')
+    {
+        neg = c == b'-';
+        s = &s[1..];
+    }
+    // Special case: if all that is left is "0", this is zero.
+    if s == "0" {
+        return Ok(0);
+    }
+    if s.is_empty() {
+        return Err(invalid());
+    }
+    while !s.is_empty() {
+        // The next character must be [0-9.]
+        let c0 = s.as_bytes()[0];
+        if !(c0 == b'.' || c0.is_ascii_digit()) {
+            return Err(invalid());
+        }
+        // Consume [0-9]*
+        let pl = s.len();
+        let (mut v, rest) = leading_int(s).map_err(|()| invalid())?;
+        s = rest;
+        let pre = pl != s.len(); // whether we consumed anything before a period
+        // Consume (\.[0-9]*)?
+        let mut post = false;
+        let mut f: u64 = 0;
+        let mut scale: f64 = 1.0;
+        if !s.is_empty() && s.as_bytes()[0] == b'.' {
+            s = &s[1..];
+            let pl = s.len();
+            (f, scale, s) = leading_fraction(s);
+            post = pl != s.len();
+        }
+        if !pre && !post {
+            // no digits (e.g. ".s" or "-.s")
+            return Err(invalid());
+        }
+        // Consume unit. The scan is over bytes, but a split can only land
+        // on an ASCII digit or '.', which is always a char boundary.
+        let mut i = 0;
+        for &c in s.as_bytes() {
+            if c == b'.' || c.is_ascii_digit() {
+                break;
+            }
+            i += 1;
+        }
+        if i == 0 {
+            return Err(format!("time: missing unit in duration {orig:?}"));
+        }
+        let (u, rest) = s.split_at(i);
+        s = rest;
+        let unit: u64 = match u {
+            "ns" => 1,
+            // U+00B5 (micro sign) and U+03BC (Greek small mu), as in Go.
+            "us" | "\u{00b5}s" | "\u{03bc}s" => 1_000,
+            "ms" => 1_000_000,
+            "s" => 1_000_000_000,
+            "m" => 60_000_000_000,
+            "h" => 3_600_000_000_000,
+            _ => return Err(format!("time: unknown unit {u:?} in duration {orig:?}")),
+        };
+        if v > (1 << 63) / unit {
+            // overflow
+            return Err(invalid());
+        }
+        v *= unit;
+        if f > 0 {
+            // f64 is needed to be nanosecond-accurate for fractions of
+            // hours; v >= 0 && (f*unit/scale) <= 3.6e12 (ns/h, h is the
+            // largest unit).
+            v += (f as f64 * (unit as f64 / scale)) as u64;
+            if v > 1 << 63 {
+                return Err(invalid());
+            }
+        }
+        d += v;
+        if d > 1 << 63 {
+            return Err(invalid());
+        }
+    }
+    if neg {
+        // d <= 1<<63 here, so the negation is always representable
+        // (i64::MIN when d is exactly 1<<63).
+        return Ok(d.wrapping_neg() as i64);
+    }
+    if d > (1 << 63) - 1 {
+        return Err(invalid());
+    }
+    Ok(d as i64)
+}
+
+/// Consumes the leading `[0-9]*` of `s`; `Err` on overflow past `1<<63`
+/// (Go: `leadingInt`).
+fn leading_int(s: &str) -> Result<(u64, &str), ()> {
+    let mut x: u64 = 0;
+    let mut i = 0;
+    for &c in s.as_bytes() {
+        if !c.is_ascii_digit() {
+            break;
+        }
+        if x > (1 << 63) / 10 {
+            return Err(());
+        }
+        x = x * 10 + u64::from(c - b'0');
+        if x > 1 << 63 {
+            return Err(());
+        }
+        i += 1;
+    }
+    Ok((x, &s[i..]))
+}
+
+/// Consumes the leading `[0-9]*` of `s` as the value and scale of a decimal
+/// fraction; digits past the point of overflow are consumed but ignored
+/// (Go: `leadingFraction`).
+fn leading_fraction(s: &str) -> (u64, f64, &str) {
+    let mut x: u64 = 0;
+    let mut scale: f64 = 1.0;
+    let mut overflow = false;
+    let mut i = 0;
+    for &c in s.as_bytes() {
+        if !c.is_ascii_digit() {
+            break;
+        }
+        i += 1;
+        if overflow {
+            continue;
+        }
+        if x > ((1u64 << 63) - 1) / 10 {
+            // It's possible for overflow to give a positive number, so
+            // take care.
+            overflow = true;
+            continue;
+        }
+        let y = x * 10 + u64::from(c - b'0');
+        if y > 1 << 63 {
+            overflow = true;
+            continue;
+        }
+        x = y;
+        scale *= 10.0;
+    }
+    (x, scale, &s[i..])
+}
+
+/// A std `Duration` as Go `time.Duration` nanoseconds, saturating at
+/// `i64::MAX` (~292 years).
+fn go_ns(d: Duration) -> i64 {
+    i64::try_from(d.as_nanos()).unwrap_or(i64::MAX)
+}
+
+/// Rounds `d` nanoseconds to the nearest millisecond, half away from zero,
+/// saturating like Go on overflow (Go: `Duration.Round(time.Millisecond)`).
+fn round_ms(d: i64) -> i64 {
+    const M: i64 = 1_000_000;
+    let r = d % M;
+    if d < 0 {
+        let r = -r;
+        if r + r < M {
+            return d + r;
+        }
+        match d.checked_sub(M - r) {
+            Some(d1) if d1 < d => d1,
+            _ => i64::MIN,
+        }
+    } else {
+        if r + r < M {
+            return d - r;
+        }
+        match d.checked_add(M - r) {
+            Some(d1) if d1 > d => d1,
+            _ => i64::MAX,
+        }
+    }
+}
+
+/// Formats `d` nanoseconds the way Go's `Duration.String` does: "0s",
+/// sub-second values with a single unit (ns/µs/ms), larger values as
+/// `[h][m]s` with up to nine fractional digits and trailing zeros dropped —
+/// e.g. "1.234s", "12ms", "1m3.5s". The CLI only feeds it the non-negative
+/// millisecond-rounded cycle durations, but the full algorithm is ported.
+fn format_go_duration(d: i64) -> String {
+    // Like Go, the digits fill a fixed buffer from the end.
+    let mut buf = [0u8; 32];
+    let mut w = buf.len();
+    let neg = d < 0;
+    let mut u = d.unsigned_abs();
+    if u < 1_000_000_000 {
+        // Special case: if duration is smaller than a second, use smaller
+        // units, like 1.2ms.
+        if u == 0 {
+            return "0s".to_string();
+        }
+        let prec;
+        w -= 1;
+        buf[w] = b's';
+        if u < 1_000 {
+            // print nanoseconds
+            prec = 0;
+            w -= 1;
+            buf[w] = b'n';
+        } else if u < 1_000_000 {
+            // print microseconds; U+00B5 'µ' (micro sign) is two bytes
+            prec = 3;
+            w -= 2;
+            buf[w..w + 2].copy_from_slice("\u{00b5}".as_bytes());
+        } else {
+            // print milliseconds
+            prec = 6;
+            w -= 1;
+            buf[w] = b'm';
+        }
+        (w, u) = fmt_frac(&mut buf, w, u, prec);
+        w = fmt_int(&mut buf, w, u);
+    } else {
+        w -= 1;
+        buf[w] = b's';
+        (w, u) = fmt_frac(&mut buf, w, u, 9);
+        // u is now integer seconds
+        w = fmt_int(&mut buf, w, u % 60);
+        u /= 60;
+        // u is now integer minutes
+        if u > 0 {
+            w -= 1;
+            buf[w] = b'm';
+            w = fmt_int(&mut buf, w, u % 60);
+            u /= 60;
+            // u is now integer hours; stop there because days can differ
+            // in length
+            if u > 0 {
+                w -= 1;
+                buf[w] = b'h';
+                w = fmt_int(&mut buf, w, u);
+            }
+        }
+    }
+    if neg {
+        w -= 1;
+        buf[w] = b'-';
+    }
+    String::from_utf8_lossy(&buf[w..]).into_owned()
+}
+
+/// Writes the `prec`-digit fraction of `v` before position `w` in `buf`,
+/// omitting trailing zeros and the decimal point if every digit is zero;
+/// returns the new write position and `v / 10^prec` (Go: `fmtFrac`).
+fn fmt_frac(buf: &mut [u8; 32], mut w: usize, mut v: u64, prec: u32) -> (usize, u64) {
+    let mut print = false;
+    for _ in 0..prec {
+        let digit = v % 10;
+        print = print || digit != 0;
+        if print {
+            w -= 1;
+            buf[w] = b'0' + digit as u8;
+        }
+        v /= 10;
+    }
+    if print {
+        w -= 1;
+        buf[w] = b'.';
+    }
+    (w, v)
+}
+
+/// Writes the decimal form of `v` before position `w` in `buf` and returns
+/// the new write position (Go: `fmtInt`).
+fn fmt_int(buf: &mut [u8; 32], mut w: usize, mut v: u64) -> usize {
+    if v == 0 {
+        w -= 1;
+        buf[w] = b'0';
+    } else {
+        while v > 0 {
+            w -= 1;
+            buf[w] = b'0' + (v % 10) as u8;
+            v /= 10;
+        }
+    }
+    w
 }
