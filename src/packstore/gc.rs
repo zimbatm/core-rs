@@ -132,7 +132,7 @@ impl Store {
         let seg = self.pin_segment(id)?;
         let fv = &seg.fv;
         let entries = &seg.mm[fv.entries_off..fv.entries_off + fv.entries_len];
-        for row in entries.chunks_exact(INDEX_ENTRY_SIZE) {
+        for row in entries.as_chunks::<INDEX_ENTRY_SIZE>().0 {
             let mut kb = [0u8; key::SIZE];
             kb.copy_from_slice(&row[..key::SIZE]);
             let off = u64::from_be_bytes([

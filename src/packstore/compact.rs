@@ -97,7 +97,7 @@ pub struct CompactStats {
 /// `footerView.allEntries`; a plain iterator rather than `iter.Seq`).
 fn all_entries(g: &SealedSegment) -> impl Iterator<Item = IndexEntry> + '_ {
     let entries = &g.mm[g.fv.entries_off..g.fv.entries_off + g.fv.entries_len];
-    entries.chunks_exact(INDEX_ENTRY_SIZE).map(|row| {
+    entries.as_chunks::<INDEX_ENTRY_SIZE>().0.iter().map(|row| {
         let mut kb = [0u8; key::SIZE];
         kb.copy_from_slice(&row[..key::SIZE]);
         IndexEntry {
