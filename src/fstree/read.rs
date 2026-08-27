@@ -175,6 +175,16 @@ pub enum WalkError<E> {
         /// The child-key parse failure.
         source: key::Error,
     },
+    /// `fstree: DirLeaf <key>: entry "<entry>" is not after "<prev>"` —
+    /// entry names failed to strictly increase across the collected leaves.
+    OutOfOrder {
+        /// The DirLeaf object's key.
+        key: Key,
+        /// The offending entry's name.
+        entry: Vec<u8>,
+        /// The previously collected name it failed to sort after.
+        prev: Vec<u8>,
+    },
     /// `fstree: <key> is not a directory object (type <type>)`
     NotDirObject {
         /// The non-directory object's key.
@@ -269,6 +279,14 @@ impl<E: fmt::Display> fmt::Display for WalkError<E> {
             WalkError::ChildKey { key, source } => {
                 write!(f, "fstree: child key in DirNode {key}: {source}")
             }
+            WalkError::OutOfOrder { key, entry, prev } => {
+                write!(
+                    f,
+                    "fstree: DirLeaf {key}: entry {:?} is not after {:?}",
+                    String::from_utf8_lossy(entry),
+                    String::from_utf8_lossy(prev)
+                )
+            }
             WalkError::NotDirObject { key } => {
                 write!(
                     f,
@@ -334,6 +352,7 @@ impl<E: std::error::Error + 'static> std::error::Error for WalkError<E> {
             WalkError::Missing(e) => Some(e),
             WalkError::Io(e) => Some(e),
             WalkError::NotDirObject { .. }
+            | WalkError::OutOfOrder { .. }
             | WalkError::NotFound { .. }
             | WalkError::NotDir { .. }
             | WalkError::DotDot { .. }
@@ -511,32 +530,50 @@ where
 /// levels into the DirLeaves that hold them. Entries are returned in name
 /// order (the order the leaves store them). `get` fetches the bytes stored
 /// under a key.
+///
+/// Names must strictly increase across leaves. This also stops a pushed DAG
+/// whose DirNodes repeat one child from expanding multiplicatively.
 pub fn collect_entries<G, E>(k: Key, mut get: G) -> Result<Vec<Entry>, WalkError<E>>
 where
     G: FnMut(Key) -> Result<Vec<u8>, E>,
 {
-    collect_inner(k, &mut get)
+    let mut out = Vec::new();
+    collect_inner(k, &mut get, &mut out)?;
+    Ok(out)
 }
 
-fn collect_inner<G, E>(k: Key, get: &mut G) -> Result<Vec<Entry>, WalkError<E>>
+fn collect_inner<G, E>(k: Key, get: &mut G, out: &mut Vec<Entry>) -> Result<(), WalkError<E>>
 where
     G: FnMut(Key) -> Result<Vec<u8>, E>,
 {
     let data = get(k).map_err(|source| WalkError::Read { key: k, source })?;
     match k.type_() {
         Type::DirLeaf => {
-            decode_dir_leaf(&data).map_err(|source| WalkError::DecodeDirLeaf { key: k, source })
+            let entries = decode_dir_leaf(&data)
+                .map_err(|source| WalkError::DecodeDirLeaf { key: k, source })?;
+            for e in entries {
+                if let Some(prev) = out.last()
+                    && e.name <= prev.name
+                {
+                    return Err(WalkError::OutOfOrder {
+                        key: k,
+                        entry: e.name.clone(),
+                        prev: prev.name.clone(),
+                    });
+                }
+                out.push(e);
+            }
+            Ok(())
         }
         Type::DirNode => {
             let pairs = decode_dir_node(&data)
                 .map_err(|source| WalkError::DecodeDirNode { key: k, source })?;
-            let mut out = Vec::new();
             for p in &pairs {
                 let ck = Key::parse(&p.child_key)
                     .map_err(|source| WalkError::ChildKey { key: k, source })?;
-                out.extend(collect_inner(ck, get)?);
+                collect_inner(ck, get, out)?;
             }
-            Ok(out)
+            Ok(())
         }
         _ => Err(WalkError::NotDirObject { key: k }),
     }
@@ -957,6 +994,80 @@ mod tests {
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].name, b"a");
         assert_eq!(got[1].name, b"z");
+    }
+
+    // A DAG whose DirNodes all point at one child would expand to fan²
+    // entries. Collection must fail at the first repeated name instead.
+    #[test]
+    fn collect_entries_rejects_fan_in_dag() {
+        let blob = encode_blob(b"x");
+        let l = leaf(&[Entry {
+            name: b"a".to_vec(),
+            mode: 0o100644,
+            content_key: blob.key.as_bytes().to_vec(),
+            ..Default::default()
+        }]);
+        const FAN: usize = 4096;
+        let mut pairs: Vec<DirPair> = (0..FAN)
+            .map(|_| DirPair {
+                sep_name: b"a".to_vec(),
+                child_key: l.key.as_bytes().to_vec(),
+            })
+            .collect();
+        let lower = encode_dir_node(&pairs).unwrap();
+        for p in &mut pairs {
+            p.child_key = lower.key.as_bytes().to_vec();
+        }
+        let upper = encode_dir_node(&pairs).unwrap();
+        let store = MemStore::of(&[&l, &lower, &upper]);
+        let gets = std::cell::Cell::new(0u32);
+        let get = store.get();
+        let counting = |k| {
+            gets.set(gets.get() + 1);
+            get(k)
+        };
+        collect_entries(upper.key, counting)
+            .expect_err("expected an error for a DAG with repeated children");
+        assert!(
+            gets.get() <= 8,
+            "{} object reads before rejecting; the DAG was being expanded",
+            gets.get()
+        );
+    }
+
+    #[test]
+    fn collect_entries_rejects_out_of_order_leaves() {
+        let blob = encode_blob(b"x");
+        let leaf_a = leaf(&[Entry {
+            name: b"a".to_vec(),
+            mode: 0o100644,
+            content_key: blob.key.as_bytes().to_vec(),
+            ..Default::default()
+        }]);
+        let leaf_z = leaf(&[Entry {
+            name: b"z".to_vec(),
+            mode: 0o100644,
+            content_key: blob.key.as_bytes().to_vec(),
+            ..Default::default()
+        }]);
+        let node = encode_dir_node(&[
+            DirPair {
+                sep_name: b"z".to_vec(),
+                child_key: leaf_z.key.as_bytes().to_vec(),
+            },
+            DirPair {
+                sep_name: b"a".to_vec(),
+                child_key: leaf_a.key.as_bytes().to_vec(),
+            },
+        ])
+        .unwrap();
+        let store = MemStore::of(&[&leaf_a, &leaf_z, &node]);
+        let err = collect_entries(node.key, store.get())
+            .expect_err("expected an error for leaves out of name order");
+        assert!(
+            matches!(err, WalkError::OutOfOrder { .. }),
+            "got {err}, want OutOfOrder"
+        );
     }
 
     #[test]

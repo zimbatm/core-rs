@@ -55,6 +55,13 @@ pub enum Error {
     },
     /// Input remained after the complete xattr map.
     TrailingBytes(usize),
+    /// The map head claimed more pairs than the remaining bytes could hold.
+    PairCount {
+        /// The claimed pair count.
+        pairs: u64,
+        /// The bytes remaining after the map head.
+        bytes: usize,
+    },
     /// Reading the `index`-th xattr key failed.
     XattrKey {
         /// Zero-based pair index within the map.
@@ -86,6 +93,9 @@ impl fmt::Display for Error {
             }
             Error::TrailingBytes(n) => {
                 write!(f, "cbor: {n} trailing bytes after xattr map")
+            }
+            Error::PairCount { pairs, bytes } => {
+                write!(f, "cbor: xattr map claims {pairs} pairs in {bytes} bytes")
             }
             Error::XattrKey { index, source } => {
                 write!(f, "cbor: xattr key {index}: {source}")
@@ -236,6 +246,13 @@ pub fn decode_xattrs(b: &[u8]) -> Result<BTreeMap<Vec<u8>, Vec<u8>>, Error> {
     let (major, n, mut b) = read_head(b)?;
     if major != MAJOR_MAP {
         return Err(Error::ExpectedMap { got: major });
+    }
+    // n is untrusted. A pair needs at least 2 bytes.
+    if n > b.len() as u64 / 2 {
+        return Err(Error::PairCount {
+            pairs: n,
+            bytes: b.len(),
+        });
     }
     let mut m = BTreeMap::new();
     for i in 0..n {
@@ -399,6 +416,23 @@ mod tests {
         assert_eq!(read_bstr(&huge), Err(Error::UnexpectedEof));
     }
 
+    // Port of Go TestDecodeXattrs_RejectsOversizedCount.
+    #[test]
+    fn decode_xattrs_rejects_oversized_count() {
+        // Headers claiming far more pairs than the remaining bytes could hold
+        // must be rejected up front, before any per-pair work.
+        for body in [
+            &[0xba, 0xff, 0xff, 0xff, 0xff][..], // u32 count
+            &[0xbb, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00], // u64 count
+            &[0xb9, 0xff, 0xff, 0x40, 0x40],     // u16 count, 2 bytes left
+        ] {
+            match decode_xattrs(body) {
+                Err(Error::PairCount { .. }) => {}
+                other => panic!("{body:02x?}: got {other:?}, want PairCount error"),
+            }
+        }
+    }
+
     // Port of Go TestEncodeXattrs_CanonicalSorted: keys must sort by their
     // bstr encoding — shorter-length keys first, then bytewise.
     #[test]
@@ -466,9 +500,11 @@ mod tests {
 
     #[test]
     fn decode_xattrs_wraps_key_and_value_errors() {
-        // Map of one pair, then nothing: key read hits EOF.
+        // Map of one pair whose key claims 2 bytes but only 1 follows: the
+        // key read hits EOF. (A bare `[0xa1]` now trips the pair-count bound
+        // before the key read.)
         assert_eq!(
-            decode_xattrs(&[0xa1]),
+            decode_xattrs(&[0xa1, 0x42, 0x61]),
             Err(Error::XattrKey {
                 index: 0,
                 source: Box::new(Error::UnexpectedEof),
@@ -524,14 +560,10 @@ mod tests {
             &[0xBB, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF][..], // 2^64-1 pairs
             &[0xBB, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00][..], // 2^40 pairs
         ] {
-            assert_eq!(
-                decode_xattrs(head),
-                Err(Error::XattrKey {
-                    index: 0,
-                    source: Box::new(Error::UnexpectedEof),
-                }),
-                "input {head:02x?}"
-            );
+            match decode_xattrs(head) {
+                Err(Error::PairCount { .. }) => {}
+                other => panic!("input {head:02x?}: got {other:?}, want PairCount error"),
+            }
         }
     }
 

@@ -131,3 +131,16 @@ matched in every case.
   "All yields exactly one error (and stops)". Go's "All must be called at
   most once" footgun is unrepresentable (the iterator owns the stream
   position).
+
+## Go PR #3 backport (2026-08-27)
+
+- `MAX_PAYLOAD` is now `pub` and set to 256 MiB, replacing both the old
+  private 4 GiB `MAX_PAYLOAD` and `MAX_WIRE_PAYLOAD`; `parse_record` rejects
+  `ulen > MAX_PAYLOAD` (between the raw ulen/slen check and the compressed
+  slen/ulen check, matching Go's validation order).
+- Go additionally needed `zstd.WithDecodeAllCapLimit` +
+  `WithDecoderMaxMemory` on its shared decoder; this port already capped the
+  decompression buffer at `ulen` (`zstd::bulk::decompress(stored, ulen)`),
+  so the "bomb stops at ulen" behavior needed no code change — only the
+  ulen bound itself was missing. The ported bomb test pins the existing
+  behavior.

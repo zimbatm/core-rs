@@ -1761,11 +1761,98 @@ fn write_parallel_error_flushes_prefix() {
 #[test]
 fn oversized_record_error_passthrough() {
     // encode_record's TooLarge surfaces unwrapped from put, like Go.
-    // (Constructing a >4 GiB payload is impractical; exercise the corrupt
+    // (Rather than allocating past MAX_PAYLOAD, exercise the corrupt
     // classification instead: Pack errors are not corrupt/verify classes.)
     let e = Error::Pack(crate::amberpack::Error::TooLarge {
         key: Key::new(Type::Blob, 1, b"x"),
         len: 5,
     });
     assert!(!e.is_corrupt() && !e.is_verify() && !e.is_closed() && !e.is_not_found());
+}
+
+// A failed write can leave junk past the active writer's logical size.
+// Sealing must not put the footer before it, since parse anchors at EOF
+// (Go: TestSealTruncatesStaleBytesPastLogicalEnd).
+#[test]
+fn seal_truncates_stale_bytes_past_logical_end() {
+    let dir = TempDir::new().unwrap();
+    let s = Store::open_with(dir.path(), Options::default().segment_size(4096)).unwrap();
+    let mut d = incompressible(1000);
+    d.push(1);
+    let first = blob_obj(&d);
+    s.put(first.key, &first.data).unwrap();
+    let active = active_files(dir.path());
+    assert_eq!(active.len(), 1, "active segments: {active:?}");
+    {
+        use std::io::Write;
+        let mut f = fs::OpenOptions::new()
+            .append(true)
+            .open(&active[0])
+            .unwrap();
+        f.write_all(&vec![0xEE; 64 << 10]).unwrap();
+    }
+
+    // Push the segment over the threshold so this put seals it.
+    let mut d = incompressible(4000);
+    d.push(2);
+    let second = blob_obj(&d);
+    s.put(second.key, &second.data).unwrap();
+    s.close().unwrap();
+
+    let s2 = Store::open(dir.path()).unwrap();
+    for o in [&first, &second] {
+        assert_eq!(
+            s2.get(o.key).unwrap(),
+            o.data,
+            "get({}) after reopen",
+            o.key
+        );
+    }
+}
+
+// A dedup-only run must still fsync: the matched records may belong to a
+// concurrent writer that has not synced yet (Go:
+// TestWriteParallelDedupOnlyRunStillSyncs).
+#[test]
+fn write_parallel_dedup_only_run_still_syncs() {
+    let dir = TempDir::new().unwrap();
+    let s = Store::open(dir.path()).unwrap();
+    let objs = test_objects(4);
+    // Stand in for a concurrent, not-yet-committed writer.
+    for o in &objs {
+        let rec = encode_record(o.key, &o.data).unwrap();
+        s.append(o.key, &rec, false).unwrap();
+    }
+    let before = s.fsyncs.load(std::sync::atomic::Ordering::Relaxed);
+    let (stats, res) = s.write_parallel(obj_seq(&objs, None), WriteOpts::default());
+    res.unwrap();
+    assert_eq!(
+        (stats.stored, stats.deduped),
+        (0, objs.len()),
+        "stats = {stats:?}, want all deduped"
+    );
+    assert_ne!(
+        s.fsyncs.load(std::sync::atomic::Ordering::Relaxed),
+        before,
+        "write_parallel returned success without an fsync"
+    );
+}
+
+// Go: TestWriteParallelSyncsOncePerRun.
+#[test]
+fn write_parallel_syncs_once_per_run() {
+    let dir = TempDir::new().unwrap();
+    let s = Store::open(dir.path()).unwrap();
+    let objs = test_objects(16);
+    let before = s.fsyncs.load(std::sync::atomic::Ordering::Relaxed);
+    let (_, res) = s.write_parallel(
+        obj_seq(&objs, None),
+        WriteOpts {
+            writers: 8,
+            ..Default::default()
+        },
+    );
+    res.unwrap();
+    let n = s.fsyncs.load(std::sync::atomic::Ordering::Relaxed) - before;
+    assert_eq!(n, 1, "{n} fsyncs for one small run, want 1");
 }

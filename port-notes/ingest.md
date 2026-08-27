@@ -154,3 +154,12 @@ every case:
 
 All scratch trees/stores lived under `/tmp/amber-interop` and were deleted;
 the Go checkout was only read (`go run` from its own directory).
+
+## Go PR #3 backport (2026-08-27)
+
+ENOTSUP/EOPNOTSUPP from the xattr *list* call now means "no xattrs" (a
+filesystem without xattr support), as in tar and rsync; get errors still
+abort. Go refactored to an injectable `readXattrsWith(list, get)` for
+testability; the port mirrors that as `read_xattrs_with` over the `xattr`
+crate's closure shapes (an iterator-returning `list` instead of Go's
+two-call size/fill protocol — the crate owns that dance).

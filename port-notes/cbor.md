@@ -100,3 +100,13 @@ note above); Rust rejects them cleanly.
 That file is owned by the scaffold, so it was left untouched; whoever owns
 it should run rustfmt on it. `src/cbor.rs` and `tests/cbor.rs` are
 fmt-clean.
+
+## Go PR #3 backport (2026-08-27)
+
+`decode_xattrs` now rejects a map head claiming more pairs than the
+remaining bytes could hold (`n > len/2`), as `Error::PairCount`, mirroring
+Go's fix. The Go bug (presizing a map from the untrusted count) never
+existed here — `BTreeMap` has no presize — so the check is parity-only:
+same inputs now fail with the same diagnostic instead of a per-pair
+`UnexpectedEof`. One pre-existing test case (`[0xa1]`, one claimed pair,
+zero bytes) moved onto the new error, as it does in Go.
