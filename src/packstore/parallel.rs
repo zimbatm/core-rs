@@ -92,16 +92,15 @@ impl Store {
     /// Stores every object the iterator yields using multiple concurrent
     /// workers. Compression and (optional) verification run in parallel;
     /// appends serialize on the active segment. Each worker fsyncs after
-    /// appending `batch_size` bytes and once more when the input is
-    /// exhausted.
+    /// appending `batch_size` bytes, and the run fsyncs once more before
+    /// returning.
     ///
     /// Like [`Store::write_batch`], it is durable-on-return but NOT atomic:
     /// on error or crash a valid prefix remains, which a content-addressed
-    /// re-run deduplicates (a dedup hit against a record appended by a
-    /// concurrent, uncommitted run rides on that run's eventual fsync). If
-    /// the iterator yields an error, the run stops and returns it. With
-    /// `verify`, a key/payload mismatch stops the run with an
-    /// [`Error::Verify`].
+    /// re-run deduplicates. The final fsync also covers dedup hits against
+    /// records a concurrent, uncommitted run appended. If the iterator
+    /// yields an error, the run stops and returns it. With `verify`, a
+    /// key/payload mismatch stops the run with an [`Error::Verify`].
     ///
     /// Returns the stats alongside the outcome because, exactly like Go's
     /// `(WriteStats, error)` pair, an erroring run still reports the work
@@ -160,12 +159,14 @@ impl Store {
             }
         });
 
-        let err = unpoison(run.first_err.into_inner());
-        if err.is_some() && run.stored.load(Ordering::Relaxed) > 0 {
-            // Mirror write_batch's error-path contract: records appended
-            // before the error are visible, so they must not stay
-            // non-durable. Best-effort; an fsync failure poisons the store.
-            let _ = self.sync_active();
+        let mut err = unpoison(run.first_err.into_inner());
+        // Always fsync, as write_batch does. Even with nothing appended a
+        // dedup hit may have matched another run's unsynced record. On error
+        // the appended prefix is visible and must become durable too.
+        if let Err(serr) = self.sync_active()
+            && err.is_none()
+        {
+            err = Some(serr);
         }
         let stats = WriteStats {
             stored: run.stored.load(Ordering::Relaxed) as usize,
@@ -177,11 +178,8 @@ impl Store {
 
     /// Consumes objects, encoding (compressing, optionally verifying) them
     /// concurrently with its siblings and appending them to the store. It
-    /// fsyncs after `batch_size` appended bytes and once more when the
-    /// channel closes. On cancellation it returns without flushing;
-    /// `write_parallel` issues a final best-effort fsync for the whole run's
-    /// appends (the segment file is shared, so one sync covers every worker)
-    /// (Go: `runWriter`).
+    /// fsyncs after every `batch_size` appended bytes. The final fsync is
+    /// `write_parallel`'s (Go: `runWriter`).
     fn run_writer(
         &self,
         rx: &Mutex<mpsc::Receiver<Object>>,
@@ -192,7 +190,7 @@ impl Store {
         let mut pending = 0usize;
         loop {
             if run.canceled() {
-                return; // no flush; the run-level best-effort sync covers us
+                return; // no flush; the run-level final sync covers us
             }
             let recv = unpoison(rx.lock()).recv();
             let obj = match recv {
@@ -237,12 +235,6 @@ impl Store {
                 if let Err(e) = self.sync_active() {
                     return run.fail(e);
                 }
-            }
-        }
-        if pending > 0 {
-            let res = self.sync_active();
-            if let Err(e) = res {
-                run.fail(e);
             }
         }
     }

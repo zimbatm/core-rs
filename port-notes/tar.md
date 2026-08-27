@@ -175,3 +175,14 @@ files; at the time of writing, crate-wide clippy still fails on
 `src/inbox.rs` (another agent's in-progress module, two
 `manual_range_patterns` findings) — not touched per the module-ownership
 rules.
+
+## Go PR #3 backport (2026-08-27)
+
+- `extract` now calls `reject_symlink_components` (an Lstat walk of the
+  target's components below dest) after the lexical `safe_join`, refusing to
+  extract through any existing non-directory — the symlink write-through
+  hole reproduced in this port before the fix. New error variant
+  `Error::ThroughNonDirectory`, same message as Go.
+- `apply_meta` chowns before chmodding, since chown(2) clears
+  setuid/setgid. The ported setuid test, like Go's, only exercises the
+  path as root (it returns early otherwise, Rust's nearest t.Skip).

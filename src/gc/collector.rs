@@ -190,13 +190,14 @@ impl Collector {
         Ok(())
     }
 
-    /// Cancels a running cycle and clears the last-cycle report. It
-    /// accompanies [`packstore::Store::wipe`] and [`refstore::Store::wipe`],
-    /// which the caller runs first; the collector itself holds no other
-    /// state (Go: `Wipe`).
-    pub fn wipe(&self) -> Result<(), Error> {
+    /// Cancels a running cycle, waits it out and then runs `reset` (the
+    /// store wipe — [`packstore::Store::wipe`] and [`refstore::Store::wipe`])
+    /// while holding the cycle slot. The mark reads segment mmaps unpinned,
+    /// so the stores must not be wiped under it (Go: `Wipe`).
+    pub fn wipe<E>(&self, reset: impl FnOnce() -> Result<(), E>) -> Result<(), E> {
         self.core.cancel_running();
         let _cycle = lock(&self.core.cycle_mu); // wait out the cancelled cycle
+        reset()?;
         let mut st = lock(&self.core.mu);
         st.last = None;
         st.last_err = None;

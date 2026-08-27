@@ -94,3 +94,15 @@ temporary Rust tests (removed after the run).
 
 No mismatches in either direction; no Rust-side defects surfaced by the
 cross-check.
+
+## Go PR #3 backport (2026-08-27)
+
+- `seal_active` truncates the file to the logical size before writing the
+  footer (`set_len(aw.size)`), since the footer parse anchors at EOF and a
+  failed write can leave junk past it.
+- `write_parallel` always fsyncs once at the end of the run (even
+  dedup-only runs — the hits may match another run's unsynced appends, and
+  a sync failure becomes the run's error if it had none); workers no longer
+  issue an end-of-input flush, only the batch-size ones. `Store` grew the
+  Go-matching `fsyncs` counter (test-observed, maintained unconditionally
+  in `sync_active` like Go's).

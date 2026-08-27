@@ -32,7 +32,7 @@ use std::io;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 
 use crate::amberpack::{self, REC_HEADER_SIZE, decode_payload, encode_record};
@@ -293,6 +293,9 @@ pub struct Store {
 
     /// In-flight exported-write starts (Go: `writesMu`/`writes`; see gc.rs).
     writes: Mutex<gc::Writes>,
+
+    /// Active-segment fsyncs issued, for tests (Go: `fsyncs`).
+    fsyncs: AtomicU64,
 }
 
 impl std::fmt::Debug for Store {
@@ -460,6 +463,7 @@ impl Store {
             capturing: AtomicBool::new(false),
             grey: Mutex::new(None),
             writes: Mutex::new(gc::Writes::new()),
+            fsyncs: AtomicU64::new(0),
         })
     }
 
@@ -600,6 +604,8 @@ impl Store {
             self.set_failed(&e);
             return Err(e.into());
         }
+        self.fsyncs
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
@@ -635,6 +641,9 @@ impl Store {
             return Ok(());
         }
         let ftr = footer::build_footer(aw.size, &entries)?;
+        // The footer is located from EOF, so drop anything a failed write
+        // left past aw.size.
+        aw.seg.f.set_len(aw.size)?;
         aw.seg.f.write_all_at(&ftr, aw.size)?;
         aw.seg.f.sync_all()?;
         let path_str = aw.seg.path.to_string_lossy().into_owned();

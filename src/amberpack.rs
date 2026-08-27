@@ -38,8 +38,9 @@ pub const REC_HEADER_SIZE: usize = 46;
 const TAG_CHUNK: u8 = 0x01;
 const FLAG_ZSTD: u8 = 0x01;
 
-/// u32 length fields cap one object at 4 GiB.
-const MAX_PAYLOAD: u64 = u32::MAX as u64;
+/// Bounds one object's payload, stored or decoded. The length fields are
+/// untrusted and size allocations. Real objects are ~1 MiB.
+pub const MAX_PAYLOAD: u32 = 256 << 20;
 
 /// Identifies the wire pack format and its version (the trailing byte).
 const PACK_MAGIC: &[u8; 8] = b"AMBERPK\x03";
@@ -48,11 +49,6 @@ const PACK_MAGIC: &[u8; 8] = b"AMBERPK\x03";
 /// (0x01, written by [`encode_record`]), so the two are distinguished on the
 /// first byte.
 const TAG_END: u8 = 0x00;
-
-/// Bounds a single record's stored payload so a hostile or corrupt stream
-/// cannot trigger an unbounded allocation. It is far above any real CAS object
-/// (the chunker MaxSize is on the order of a few hundred KiB).
-const MAX_WIRE_PAYLOAD: u32 = 256 << 20; // 256 MiB
 
 /// Errors from the amberpack codec, mirroring the Go package's two `errors.Is`
 /// sentinels (`ErrCorrupt`, `ErrMalformed`) plus the encode-side size error and
@@ -75,8 +71,7 @@ pub enum Error {
     /// `Corrupt`.
     #[error("amberpack: malformed pack stream: {0}")]
     Malformed(String),
-    /// The payload handed to [`encode_record`] exceeds the format's u32 length
-    /// fields (4 GiB).
+    /// The payload handed to [`encode_record`] exceeds [`MAX_PAYLOAD`].
     #[error("amberpack: object {key} too large: {len} bytes")]
     TooLarge {
         /// The key the oversized payload was to be stored under.
@@ -117,11 +112,10 @@ pub struct Record {
     pub slen: u32,
 }
 
-/// Reports whether a payload of `n` bytes fits the format's u32 length fields.
-/// Split out of [`encode_record`] so the bound is testable without allocating
-/// 4 GiB.
+/// Reports whether a payload of `n` bytes is within [`MAX_PAYLOAD`]. Split out
+/// of [`encode_record`] so the bound is testable without allocating it.
 fn payload_fits(n: usize) -> bool {
-    n as u64 <= MAX_PAYLOAD
+    n as u64 <= u64::from(MAX_PAYLOAD)
 }
 
 /// Serializes `(k, data)` into a complete record, compressing the payload with
@@ -177,6 +171,11 @@ pub fn parse_record(b: &[u8]) -> Result<Record, Error> {
     if flags & FLAG_ZSTD == 0 && ulen != slen {
         return Err(Error::Corrupt(format!(
             "raw record with ulen {ulen} != slen {slen}"
+        )));
+    }
+    if ulen > MAX_PAYLOAD {
+        return Err(Error::Corrupt(format!(
+            "record ulen {ulen} exceeds limit {MAX_PAYLOAD}"
         )));
     }
     if flags & FLAG_ZSTD != 0 && slen >= ulen {
@@ -337,9 +336,9 @@ impl<R: Read> Reader<R> {
                     self.read_full(rest, "truncated record header")?;
                 }
                 let slen = u32::from_be_bytes([hdr[38], hdr[39], hdr[40], hdr[41]]);
-                if slen > MAX_WIRE_PAYLOAD {
+                if slen > MAX_PAYLOAD {
                     return Err(Error::Malformed(format!(
-                        "record payload {slen} exceeds limit {MAX_WIRE_PAYLOAD}"
+                        "record payload {slen} exceeds limit {MAX_PAYLOAD}"
                     )));
                 }
                 let mut full = vec![0u8; REC_HEADER_SIZE + slen as usize];
@@ -484,14 +483,40 @@ mod tests {
     #[test]
     fn record_too_large_bound() {
         assert!(
-            payload_fits(u32::MAX as usize),
-            "payload_fits must accept exactly 4 GiB - 1"
+            payload_fits(MAX_PAYLOAD as usize),
+            "payload_fits must accept exactly MAX_PAYLOAD"
         );
         assert!(
-            !payload_fits(u32::MAX as usize + 1),
-            "payload_fits must reject > 4 GiB - 1"
+            !payload_fits(MAX_PAYLOAD as usize + 1),
+            "payload_fits must reject MAX_PAYLOAD+1"
         );
         assert!(payload_fits(0), "payload_fits must accept empty payloads");
+    }
+
+    #[test]
+    fn parse_record_rejects_oversized_ulen() {
+        let data = compressible(4096);
+        let mut rec = encode_record(mk_key(&data), &data).unwrap();
+        assert_eq!(
+            rec[33] & FLAG_ZSTD,
+            FLAG_ZSTD,
+            "test needs a compressed record"
+        );
+        rec[34..38].copy_from_slice(&u32::MAX.to_be_bytes());
+        fix_crc(&mut rec);
+        let err = parse_record(&rec).unwrap_err();
+        assert!(err.is_corrupt(), "want Corrupt, got {err:?}");
+    }
+
+    // Go's "bomb stops at ulen": a frame that inflates far past the declared
+    // ulen must fail without allocating the inflated size. The Rust decoder
+    // caps its buffer at ulen, so the 64 MiB expansion never materializes.
+    #[test]
+    fn decode_payload_bomb_stops_at_ulen() {
+        let bomb =
+            zstd::bulk::compress(&vec![0u8; 64 << 20], zstd::DEFAULT_COMPRESSION_LEVEL).unwrap();
+        let err = decode_payload(FLAG_ZSTD, 1024, &bomb).unwrap_err();
+        assert!(err.is_corrupt(), "want Corrupt, got {err:?}");
     }
 
     #[test]
@@ -809,13 +834,13 @@ mod tests {
 
     #[test]
     fn reader_oversized_payload_rejected() {
-        // A header claiming a payload above MAX_WIRE_PAYLOAD is rejected
+        // A header claiming a payload above MAX_PAYLOAD is rejected
         // before any allocation (and before the CRC check). Only the header
         // follows the magic — no payload bytes — so the size guard must fire
         // before the payload read, not after.
         let rec = encode_record(mk_key(b"x"), b"x").unwrap();
         let mut hdr = rec[..REC_HEADER_SIZE].to_vec();
-        hdr[38..42].copy_from_slice(&(MAX_WIRE_PAYLOAD + 1).to_be_bytes());
+        hdr[38..42].copy_from_slice(&(MAX_PAYLOAD + 1).to_be_bytes());
         let err = collect(Reader::new(&wire_pack(&hdr)[..])).unwrap_err();
         assert!(err.is_malformed(), "oversized payload: {err}");
         assert!(

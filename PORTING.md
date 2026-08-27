@@ -1,9 +1,10 @@
 # Porting contract (Go → Rust)
 
 This crate is a port of `github.com/jobs-build/amber-store-core` (Go), pinned
-at commit `a2ff135cd1c94bdd04c9eca4c5019062eb4dbe81`. The Go sources are the
-normative reference wherever this document or `architecture/` is silent; a
-local checkout lives at `/Users/dragan/jobs-build/amber-store-core`.
+at commit `2d22eef35a3151b854b2beb0a1cb6029ad6ced88` (the merge of PR #3,
+which back-ported the bug fixes from draganm/amber-store#12). The Go sources
+are the normative reference wherever this document or `architecture/` is
+silent; a local checkout lives at `/Users/dragan/jobs-build/amber-store-core`.
 
 ## Compatibility contract
 

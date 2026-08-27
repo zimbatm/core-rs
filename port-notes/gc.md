@@ -189,3 +189,14 @@ crates, no unsafe).
 - No gaps found in the wave-1 packstore GC surface or the fstree
   `check_complete` (visited-keys) API — everything needed existed with the
   documented signatures.
+
+## Go PR #3 backport (2026-08-27)
+
+`Collector::wipe` now takes the store reset as a callback and runs it while
+holding the cycle slot (after cancelling and waiting out a running cycle),
+because the mark reads segment mmaps unpinned. Go's `Wipe(reset func()
+error) error` returns the reset error directly; the Rust signature is
+generic over the callback's error type (`fn wipe<E>(&self, reset: impl
+FnOnce() -> Result<(), E>) -> Result<(), E>`) since the collector itself
+has nothing to fail with there. Nothing in this crate calls it (no server),
+same as Go.

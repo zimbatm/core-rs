@@ -126,3 +126,11 @@ checkcomplete}.go` at the pinned commit.
   harness.
 - All interesting Go tests from the seven `_test.go` files are ported into
   the module `#[cfg(test)]` blocks.
+
+## Go PR #3 backport (2026-08-27)
+
+`collect_entries` now requires names to strictly increase across leaves and
+fails with the new `WalkError::OutOfOrder` on the first violation, instead
+of concatenating (Go: fail CollectEntries on the first out-of-order entry).
+This also stops a pushed fan-in DAG from expanding multiplicatively; the
+ported fan² test read 4 GiB of entries into memory before the fix.

@@ -579,3 +579,58 @@ fn free_below_probes_the_filesystem() {
     // A failed probe must report no pressure.
     assert!(!free_below(&dir.path().join("missing"), u64::MAX));
 }
+
+// Wipe must not reset the stores while a cycle is still marking (Go:
+// TestWipeWaitsForRunningCycleBeforeReset).
+#[test]
+fn wipe_waits_for_running_cycle_before_reset() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
+
+    let ts = new_test_store(4 << 10);
+    let c = open_collector(&ts, Options::default());
+    let (root, _) = store_tree(&ts.objects, "a", 10);
+    put_test_ref(&c, &ts.refs, "a", root);
+
+    let entered = Arc::new(AtomicBool::new(false));
+    let release = Arc::new(AtomicBool::new(false));
+    {
+        let (entered, release) = (Arc::clone(&entered), Arc::clone(&release));
+        lock(&c.core.mu).mid_mark = Some(Arc::new(move || {
+            entered.store(true, Ordering::SeqCst);
+            while !release.load(Ordering::SeqCst) {
+                thread::sleep(Duration::from_millis(1));
+            }
+        }));
+    }
+    let run_c = c.test_handle();
+    let cycle = thread::spawn(move || {
+        let _ = run_c.run(0.0); // canceled by wipe
+    });
+    while !entered.load(Ordering::SeqCst) {
+        thread::sleep(Duration::from_millis(1));
+    }
+
+    let reset_called = Arc::new(AtomicBool::new(false));
+    let wipe_c = c.test_handle();
+    let wipe = {
+        let reset_called = Arc::clone(&reset_called);
+        thread::spawn(move || {
+            wipe_c.wipe(|| {
+                reset_called.store(true, Ordering::SeqCst);
+                Ok::<(), std::convert::Infallible>(())
+            })
+        })
+    };
+    thread::sleep(Duration::from_millis(50));
+    assert!(
+        !reset_called.load(Ordering::SeqCst),
+        "reset ran before the cycle finished"
+    );
+    release.store(true, Ordering::SeqCst);
+    wipe.join().unwrap().expect("wipe");
+    assert!(reset_called.load(Ordering::SeqCst));
+    cycle.join().unwrap();
+    let hook = lock(&c.core.mu).mid_mark.take();
+    drop(hook);
+}

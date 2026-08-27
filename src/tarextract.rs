@@ -92,6 +92,11 @@ pub enum Error {
         /// The OS error.
         source: io::Error,
     },
+    /// `refusing to extract through non-directory <path>`
+    ThroughNonDirectory {
+        /// The existing non-directory component.
+        path: PathBuf,
+    },
     /// `<target>: unsupported tar type '<flag>'`
     Unsupported {
         /// The path the member would have created.
@@ -128,6 +133,13 @@ impl fmt::Display for Error {
             ),
             Error::SetMtime { target, source } => {
                 write!(f, "{}: set mtime: {source}", target.display())
+            }
+            Error::ThroughNonDirectory { path } => {
+                write!(
+                    f,
+                    "refusing to extract through non-directory {}",
+                    path.display()
+                )
             }
             Error::Unsupported { target, typeflag } => {
                 // Go renders the flag with %q on a byte: a rune literal.
@@ -177,6 +189,9 @@ where
     let mut dirs: Vec<TarHeader> = Vec::new(); // directories, for deferred metadata
     while let Some(h) = tr.next()? {
         let target = safe_join(dest_dir, &h.name)?;
+        // safe_join is lexical. An earlier symlink member could still lead
+        // directory creation or the open out of dest_dir.
+        reject_symlink_components(dest_dir, &target)?;
         match h.typeflag {
             TYPE_DIR => {
                 let mut db = fs::DirBuilder::new();
@@ -240,6 +255,27 @@ where
     Ok(())
 }
 
+/// Fails if any existing component of `path` below `dest` is not a real
+/// directory (Go: `rejectSymlinkComponents`).
+fn reject_symlink_components(dest: &Path, path: &Path) -> Result<(), Error> {
+    let mut p = path;
+    while p != dest && p.starts_with(dest) {
+        match fs::symlink_metadata(p) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(Error::Io(e)),
+            Ok(fi) if !fi.is_dir() => {
+                return Err(Error::ThroughNonDirectory {
+                    path: p.to_path_buf(),
+                });
+            }
+            Ok(_) => {}
+        }
+        let Some(parent) = p.parent() else { break };
+        p = parent;
+    }
+    Ok(())
+}
+
 /// Joins `name` under `dest`, rejecting any name that escapes `dest`: names
 /// containing `..` components (in any position) are refused, and the name is
 /// re-rooted before joining so absolute names cannot escape either.
@@ -278,15 +314,10 @@ fn write_regular<R: io::Read>(target: &Path, r: &mut R) -> Result<(), Error> {
 
 /// Restores permissions, ownership, xattrs, and mtime for `target`.
 /// Permissions and mtime are faithful; ownership only when running as root;
-/// xattrs best-effort. mtime is set last. Symlink targets are not chmod'd
-/// and their xattrs are skipped.
+/// xattrs best-effort. chown runs before chmod because it clears
+/// setuid/setgid. mtime is set last. Symlink targets are not chmod'd and
+/// their xattrs are skipped.
 fn apply_meta(target: &Path, h: &TarHeader, is_symlink: bool) -> Result<(), Error> {
-    if !is_symlink {
-        chmod(target, (h.mode & 0o7777) as u32).map_err(|source| Error::Chmod {
-            target: target.to_path_buf(),
-            source,
-        })?;
-    }
     // SAFETY: geteuid takes no arguments and cannot fail.
     if unsafe { libc::geteuid() } == 0 {
         lchown(target, h.uid as libc::uid_t, h.gid as libc::gid_t).map_err(|source| {
@@ -297,6 +328,10 @@ fn apply_meta(target: &Path, h: &TarHeader, is_symlink: bool) -> Result<(), Erro
         })?;
     }
     if !is_symlink {
+        chmod(target, (h.mode & 0o7777) as u32).map_err(|source| Error::Chmod {
+            target: target.to_path_buf(),
+            source,
+        })?;
         for (k, v) in &h.pax_records {
             let Some(name) = k.strip_prefix(XATTR_PREFIX) else {
                 continue;
@@ -1050,6 +1085,114 @@ mod tests {
     }
 
     const TYPE_LINK_TEST: u8 = b'1'; // hard link: tarexport never emits it
+
+    /// Go's `buildTar`: a PAX archive of the given members, regular files
+    /// filled with `size` bytes of `x`.
+    fn build_tar(entries: Vec<TarHeader>) -> Vec<u8> {
+        let mut buf: Vec<u8> = Vec::new();
+        let mut tw = TarWriter::new(&mut buf);
+        for mut h in entries {
+            h.format = F_PAX;
+            h.mod_time = Some(PaxTime::unix(1_700_000_000, 0));
+            let (typeflag, size) = (h.typeflag, h.size);
+            tw.write_header(&h).unwrap();
+            if typeflag == TYPE_REG {
+                tw.write_all(&vec![b'x'; size as usize]).unwrap();
+            }
+        }
+        tw.close().unwrap();
+        buf
+    }
+
+    // A symlink member followed by entries beneath it must not let the
+    // archive write through the link to a location outside dest_dir (Go:
+    // TestExtract_RejectsWriteThroughSymlink).
+    #[test]
+    fn extract_rejects_write_through_symlink() {
+        let outside = tempfile::tempdir().unwrap();
+        let sym = |name: &[u8]| {
+            let mut h = pax_header(name, TYPE_SYMLINK);
+            h.linkname = outside.path().as_os_str().as_bytes().to_vec();
+            h
+        };
+        let reg = |name: &[u8]| {
+            let mut h = pax_header(name, TYPE_REG);
+            h.mode = 0o644;
+            h.size = 1;
+            h
+        };
+        let dir = |name: &[u8]| {
+            let mut h = pax_header(name, TYPE_DIR);
+            h.mode = 0o755;
+            h
+        };
+        let cases: Vec<(&str, Vec<TarHeader>)> = vec![
+            ("file through link", vec![sym(b"a"), reg(b"a/pwned")]),
+            (
+                "dir through link",
+                vec![sym(b"a"), dir(b"a/sub/"), reg(b"a/sub/pwned")],
+            ),
+            ("dir entry on top of link", vec![sym(b"a"), dir(b"a/")]),
+        ];
+        for (name, entries) in cases {
+            let buf = build_tar(entries);
+            let tmp = tempfile::tempdir().unwrap();
+            let dest = tmp.path().join("out");
+            assert!(
+                extract(&mut &buf[..], &dest).is_err(),
+                "{name}: expected error"
+            );
+            let leaked: Vec<_> = fs::read_dir(outside.path())
+                .unwrap()
+                .map(|e| e.unwrap().file_name())
+                .collect();
+            assert!(
+                leaked.is_empty(),
+                "{name}: wrote outside dest_dir: {leaked:?}"
+            );
+        }
+    }
+
+    // The regular case still works: a symlink member sitting next to, not
+    // above, the entries that follow it (Go: TestExtract_SymlinkSibling).
+    #[test]
+    fn extract_symlink_sibling() {
+        let mut d = pax_header(b"d/", TYPE_DIR);
+        d.mode = 0o755;
+        let mut link = pax_header(b"d/link", TYPE_SYMLINK);
+        link.linkname = b"/etc".to_vec();
+        let mut f = pax_header(b"d/f", TYPE_REG);
+        f.mode = 0o644;
+        f.size = 1;
+        let buf = build_tar(vec![d, link, f]);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("out");
+        extract(&mut &buf[..], &dest).expect("extract");
+        fs::metadata(dest.join("d").join("f")).expect("d/f");
+    }
+
+    // chown(2) strips setuid/setgid, so ownership must be restored before
+    // the mode. Only observable when extract actually chowns, i.e. as root
+    // (Go: TestExtract_SetuidSurvivesChown).
+    #[test]
+    fn extract_setuid_survives_chown() {
+        // SAFETY: geteuid takes no arguments and cannot fail.
+        if unsafe { libc::geteuid() } != 0 {
+            return; // needs root to exercise the chown path
+        }
+        let mut h = pax_header(b"suid", TYPE_REG);
+        h.mode = 0o4755;
+        h.size = 1;
+        h.uid = 1;
+        h.gid = 1;
+        let buf = build_tar(vec![h]);
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("out");
+        extract(&mut &buf[..], &dest).expect("extract");
+        let fi = fs::symlink_metadata(dest.join("suid")).unwrap();
+        assert_ne!(fi.mode() & 0o4000, 0, "setuid bit lost: {:o}", fi.mode());
+    }
 
     // --- safeJoin ---
 
