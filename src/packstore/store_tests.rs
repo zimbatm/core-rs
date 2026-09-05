@@ -66,6 +66,24 @@ fn active_files(dir: &Path) -> Vec<std::path::PathBuf> {
 }
 
 #[test]
+fn unflushed_put_sync_reopens_across_rotation() {
+    let dir = TempDir::new().unwrap();
+    let objs = test_objects(200);
+    let store = Store::open_with(dir.path(), Options::new().segment_size(8 << 10)).unwrap();
+    for object in &objs {
+        store.put_unflushed(object.key, &object.data).unwrap();
+        assert_eq!(store.get(object.key).unwrap(), object.data);
+    }
+    store.sync().unwrap();
+    store.close().unwrap();
+    let reopened = Store::open(dir.path()).unwrap();
+    for object in &objs {
+        assert_eq!(reopened.get(object.key).unwrap(), object.data);
+    }
+    reopened.close().unwrap();
+}
+
+#[test]
 fn put_get_has_round_trip() {
     let dir = TempDir::new().unwrap();
     let s = Store::open(dir.path()).unwrap();

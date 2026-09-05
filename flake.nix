@@ -7,20 +7,51 @@
 
   };
 
-  outputs = { self, nixpkgs, systems, ... }@inputs:
+  outputs =
+    {
+      self,
+      nixpkgs,
+      systems,
+      ...
+    }@inputs:
     let
-      eachSystem = f:
-        nixpkgs.lib.genAttrs (import systems)
-        (system: f system nixpkgs.legacyPackages.${system});
-    in {
+      eachSystem =
+        f: nixpkgs.lib.genAttrs (import systems) (system: f system nixpkgs.legacyPackages.${system});
+    in
+    {
 
-      devShells = eachSystem (system: pkgs: {
-        default = pkgs.mkShell {
-          hardeningDisable = [ "all" ];
+      formatter = eachSystem (
+        system: pkgs:
+        pkgs.writeShellApplication {
+          name = "amber-core-fmt";
+          runtimeInputs = [
+            pkgs.cargo
+            pkgs.rustfmt
+            pkgs.nixfmt
+          ];
+          text = ''
+            cargo fmt
+            nixfmt flake.nix
+          '';
+        }
+      );
 
-          # go regenerates the golden vectors (tools/vectorgen)
-          packages = with pkgs; [ cargo rustc rustfmt clippy rust-analyzer go ];
-        };
-      });
+      devShells = eachSystem (
+        system: pkgs: {
+          default = pkgs.mkShell {
+            hardeningDisable = [ "all" ];
+
+            # go regenerates the golden vectors (tools/vectorgen)
+            packages = with pkgs; [
+              cargo
+              rustc
+              rustfmt
+              clippy
+              rust-analyzer
+              go
+            ];
+          };
+        }
+      );
     };
 }

@@ -731,9 +731,22 @@ impl Store {
 
     /// Stores a single object under `k`, deduplicating against existing
     /// content. A dedup hit returns success without fsyncing; if the matching
-    /// record was appended by a still-running batch, its durability rides on
-    /// that batch's commit (Go: `Put`).
+    /// record was appended by a still-running batch or [`Store::put_unflushed`],
+    /// its durability depends on that writer's explicit sync (Go: `Put`).
     pub fn put(&self, k: Key, data: &[u8]) -> Result<(), Error> {
+        self.put_with_sync(k, data, true)
+    }
+
+    /// Stores an object without flushing the active segment.
+    /// Readers can observe it immediately, but it is not yet durable.
+    /// Call [`Store::sync`] before publishing references to these objects.
+    /// Segment rotation can flush earlier than that explicit boundary.
+    /// Deduplication, verification, and GC barrier observation match [`Store::put`].
+    pub fn put_unflushed(&self, k: Key, data: &[u8]) -> Result<(), Error> {
+        self.put_with_sync(k, data, false)
+    }
+
+    fn put_with_sync(&self, k: Key, data: &[u8], sync_now: bool) -> Result<(), Error> {
         let _write_token = self.begin_write();
         {
             let sh = unpoison(self.shared.read());
@@ -748,7 +761,7 @@ impl Store {
             return Ok(());
         }
         let rec = encode_record(k, data).map_err(Error::Pack)?;
-        self.append(k, &rec, true)
+        self.append(k, &rec, sync_now)
     }
 
     /// Returns the bytes stored under `k`, or [`Error::NotFound`] if `k` is
