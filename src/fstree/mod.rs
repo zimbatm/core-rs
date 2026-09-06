@@ -27,8 +27,9 @@ pub use encode::{
 };
 pub use fx::{CborError, CborType};
 pub use read::{
-    ChildKeysError, MissingObjectError, WalkError, check_complete, child_keys, collect_entries,
-    list_entries, lookup_entry, reachable_keys, resolve_entry, resolve_path, write_content,
+    ChildKeysError, MissingObjectError, WalkError, check_complete, check_extension, child_keys,
+    collect_entries, list_entries, lookup_entry, reachable_keys, resolve_entry, resolve_path,
+    write_content,
 };
 
 /// A built CAS object: its key and its serialized bytes.

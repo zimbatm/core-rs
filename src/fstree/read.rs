@@ -750,6 +750,27 @@ where
     H: Fn(Key) -> Result<bool, E> + Sync,
     E: Send,
 {
+    check_extension(root, get, has, |_| false, jobs)
+}
+
+/// Checks completeness outside previously verified subgraphs.
+/// The caller must keep every boundary's complete closure present throughout
+/// this walk and any subsequent publication. Boundary keys are included in
+/// the result, but their descendants are not. The result is therefore not a
+/// complete reachability list and must not be used as a garbage collection mark.
+pub fn check_extension<G, H, B, E>(
+    root: Key,
+    get: G,
+    has: H,
+    boundary: B,
+    jobs: usize,
+) -> Result<Vec<Key>, WalkError<E>>
+where
+    G: Fn(Key) -> Result<Vec<u8>, E> + Sync,
+    H: Fn(Key) -> Result<bool, E> + Sync,
+    B: Fn(Key) -> bool + Sync,
+    E: Send,
+{
     let jobs = if jobs == 0 { default_jobs() } else { jobs };
     let mut visited = vec![root];
     let mut seen: HashSet<Key> = HashSet::from([root]);
@@ -757,6 +778,9 @@ where
 
     while !frontier.is_empty() {
         let results = parallel_map(&frontier, jobs, |k| {
+            if boundary(k) {
+                return Ok(Vec::new());
+            }
             if matches!(k.type_(), Type::Blob | Type::XattrSet) {
                 return match has(k) {
                     Ok(true) => Ok(Vec::new()),
@@ -1648,6 +1672,62 @@ mod tests {
             check_complete(root, store.get(), store.has(), 1).unwrap(),
             visited
         );
+    }
+
+    #[test]
+    fn check_extension_reuses_only_verified_subgraphs() {
+        let objects = complete_tree();
+        let old_root = objects.last().unwrap().key;
+        let added = encode_blob(b"new content");
+        let root = leaf(&[
+            Entry {
+                name: b"added".to_vec(),
+                content_key: added.key.as_bytes().to_vec(),
+                ..Default::default()
+            },
+            Entry {
+                name: b"old".to_vec(),
+                content_key: old_root.as_bytes().to_vec(),
+                ..Default::default()
+            },
+        ]);
+        let mut store = MemStore::of(&objects.iter().collect::<Vec<_>>());
+        check_complete(old_root, store.get(), store.has(), 4).unwrap();
+        store.insert(&added);
+        store.insert(&root);
+        for jobs in [1, 4] {
+            let reads = AtomicUsize::new(0);
+            let leaves = AtomicUsize::new(0);
+            let visited = check_extension(
+                root.key,
+                |key| {
+                    assert_eq!(key, root.key);
+                    reads.fetch_add(1, Ordering::Relaxed);
+                    store.get()(key)
+                },
+                |key| {
+                    assert_eq!(key, added.key);
+                    leaves.fetch_add(1, Ordering::Relaxed);
+                    store.has()(key)
+                },
+                |key| key == old_root,
+                jobs,
+            )
+            .unwrap();
+            assert_eq!(visited.len(), 3);
+            assert_eq!(reads.load(Ordering::Relaxed), 1);
+            assert_eq!(leaves.load(Ordering::Relaxed), 1);
+        }
+        assert_eq!(
+            check_complete(root.key, store.get(), store.has(), 4)
+                .unwrap()
+                .len(),
+            objects.len() + 2
+        );
+        store.0.remove(&added.key);
+        let error = check_extension(root.key, store.get(), store.has(), |key| key == old_root, 4)
+            .unwrap_err();
+        assert!(matches!(error, WalkError::Missing(error) if error.key == added.key));
     }
 
     #[test]
