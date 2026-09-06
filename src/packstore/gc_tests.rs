@@ -687,6 +687,28 @@ fn compact_keeps_barrier_grey() {
 }
 
 #[test]
+fn copied_records_join_collection_barrier() {
+    let (_dir, store, objects) = compact_store();
+    let mut data = incompressible(4 << 10);
+    data[0] = 5;
+    let novel = blob_obj(&data);
+    store.begin_barrier();
+    for object in [&objects[0], &novel] {
+        let record = crate::amberpack::encode_record(object.key, &object.data).unwrap();
+        store.put_record_unflushed(object.key, &record).unwrap();
+    }
+    store
+        .compact(live_set(&objects, &[2]), CompactOpts::default())
+        .unwrap();
+    for object in [&objects[0], &novel, &objects[2]] {
+        assert_eq!(store.get(object.key).unwrap(), object.data);
+    }
+    for i in [1, 3, 4] {
+        assert!(!store.has(objects[i].key).unwrap());
+    }
+}
+
+#[test]
 fn observe_keys_protects_closure() {
     let (_dir, s, objs) = compact_store();
     s.begin_barrier();

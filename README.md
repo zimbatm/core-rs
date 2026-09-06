@@ -92,6 +92,10 @@ The benchmark compares individual writes, bounded batches, and unflushed writes 
 Every run reopens its store and verifies all payloads.
 The payloads are synthetic 256-byte blobs; these results do not predict complete application throughput.
 Use `put_unflushed` only when the caller owns the durability boundary.
+`put_record_unflushed` copies an existing encoded record without recompression.
+It verifies framing, CRC, the requested key, and the decoded payload hash, including duplicate records.
+It preserves the existing record format and observes the collection barrier.
+Call `sync` before publishing references to copied records.
 Call `sync` before publishing references to those objects.
 
 ## License

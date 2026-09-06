@@ -154,6 +154,86 @@ fn get_record_absent_returns_not_found() {
 }
 
 #[test]
+fn copied_records_preserve_bytes_across_rotation_and_reopen() {
+    let dir = TempDir::new().unwrap();
+    let store = Store::open_with(dir.path(), Options::new().segment_size(2048)).unwrap();
+    let objects: Vec<_> = (0..30)
+        .map(|i| {
+            let mut bytes = if i % 2 == 0 {
+                compressible(1500)
+            } else {
+                incompressible(1500)
+            };
+            bytes.push(i);
+            blob_obj(&bytes)
+        })
+        .collect();
+    let records: Vec<_> = objects
+        .iter()
+        .enumerate()
+        .map(|(i, object)| {
+            let mut record = encode_record(object.key, &object.data).unwrap();
+            if i % 4 == 0 {
+                // A valid raw encoding of compressible data detects accidental recompression.
+                record.truncate(REC_HEADER_SIZE);
+                record[33] = 0;
+                record[38..42].copy_from_slice(&(object.data.len() as u32).to_be_bytes());
+                record[42..46].fill(0);
+                record.extend_from_slice(&object.data);
+                let crc = crc32c::crc32c(&record);
+                record[42..46].copy_from_slice(&crc.to_be_bytes());
+                assert_ne!(record, encode_record(object.key, &object.data).unwrap());
+            }
+            record
+        })
+        .collect();
+    for (object, record) in objects.iter().zip(&records) {
+        store.put_record_unflushed(object.key, record).unwrap();
+        store.put_record_unflushed(object.key, record).unwrap();
+        assert_eq!(&store.get_record(object.key).unwrap(), record);
+    }
+    store.sync().unwrap();
+    store.close().unwrap();
+    let reopened = Store::open(dir.path()).unwrap();
+    for (object, record) in objects.iter().zip(&records) {
+        assert_eq!(reopened.get(object.key).unwrap(), object.data);
+        assert_eq!(&reopened.get_record(object.key).unwrap(), record);
+    }
+    reopened.close().unwrap();
+}
+
+#[test]
+fn copied_records_reject_corruption_even_on_dedup_hits() {
+    let dir = TempDir::new().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let object = blob_obj(&compressible(4096));
+    let record = encode_record(object.key, &object.data).unwrap();
+    let other = blob_obj(b"other");
+    let mut bad_crc = record.clone();
+    bad_crc[42] ^= 1;
+    let mut trailing = record.clone();
+    trailing.push(0);
+    let wrong_hash = encode_record(object.key, b"wrong payload").unwrap();
+    let wrong_key = encode_record(other.key, &other.data).unwrap();
+    for existing in [false, true] {
+        if existing {
+            store.put_record_unflushed(object.key, &record).unwrap();
+        }
+        for corrupt in [
+            &bad_crc[..],
+            &trailing[..],
+            &wrong_hash[..],
+            &wrong_key[..],
+            &record[..record.len() - 1],
+        ] {
+            assert!(store.put_record_unflushed(object.key, corrupt).is_err());
+        }
+        assert_eq!(store.has(object.key).unwrap(), existing);
+    }
+    assert_eq!(store.get_record(object.key).unwrap(), record);
+}
+
+#[test]
 fn stored_size_matches_record_payload() {
     let dir = TempDir::new().unwrap();
     let s = Store::open_with(dir.path(), Options::default().segment_size(2048)).unwrap();

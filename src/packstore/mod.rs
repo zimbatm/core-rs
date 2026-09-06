@@ -746,6 +746,43 @@ impl Store {
         self.put_with_sync(k, data, false)
     }
 
+    /// Stores one encoded record without recompression or an immediate flush.
+    /// Validates exact framing, CRC, the requested key, and the decoded payload hash,
+    /// including on dedup hits. Call [`Store::sync`] before publishing references.
+    /// GC barrier observation and segment rotation match [`Store::put_unflushed`].
+    pub fn put_record_unflushed(&self, k: Key, bytes: &[u8]) -> Result<(), Error> {
+        let _write_token = self.begin_write();
+        {
+            let sh = unpoison(self.shared.read());
+            if sh.closed {
+                return Err(Error::Closed);
+            }
+            if let Some(msg) = &sh.failed {
+                return Err(Error::Failed(msg.clone()));
+            }
+        }
+        let record = amberpack::parse_record(bytes).map_err(Error::Pack)?;
+        if record.key != k || bytes.len() != REC_HEADER_SIZE + record.slen as usize {
+            return Err(Error::Verify(
+                "encoded record key or length mismatch".into(),
+            ));
+        }
+        let data = decode_payload(record.flags, record.ulen, &bytes[REC_HEADER_SIZE..])
+            .map_err(Error::Pack)?;
+        if Key::new(k.type_(), k.length(), &data) != k {
+            return Err(Error::Verify(
+                "encoded record payload checksum mismatch".into(),
+            ));
+        }
+        drop(data);
+        // Dedup hits must remain visible to an active collection barrier.
+        self.observe(k);
+        if self.has(k)? {
+            return Ok(());
+        }
+        self.append(k, bytes, false)
+    }
+
     fn put_with_sync(&self, k: Key, data: &[u8], sync_now: bool) -> Result<(), Error> {
         let _write_token = self.begin_write();
         {
