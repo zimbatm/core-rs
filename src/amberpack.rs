@@ -27,7 +27,13 @@
 //! are not byte-identical (Go uses `klauspost/compress`, this port uses
 //! libzstd), but each side decodes the other's frames; see PORTING.md.
 
+use std::cell::RefCell;
 use std::io::{self, BufReader, BufWriter, Read, Write};
+
+thread_local! {
+    // Each writer reuses its workspace without serializing independent threads.
+    static COMPRESSOR: RefCell<Option<zstd::bulk::Compressor<'static>>> = const { RefCell::new(None) };
+}
 
 use crate::key::Key;
 
@@ -131,7 +137,13 @@ pub fn encode_record(k: Key, data: &[u8]) -> Result<Vec<u8>, Error> {
     // Level 3 is the libzstd default, matching Go's klauspost default level.
     // A compression failure (allocation, in practice impossible) falls back to
     // raw storage — indistinguishable from "did not get smaller".
-    let comp = zstd::bulk::compress(data, zstd::DEFAULT_COMPRESSION_LEVEL).ok();
+    let comp = COMPRESSOR.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_none() {
+            *slot = zstd::bulk::Compressor::new(zstd::DEFAULT_COMPRESSION_LEVEL).ok();
+        }
+        slot.as_mut()?.compress(data).ok()
+    });
     let (payload, flags): (&[u8], u8) = match comp.as_deref() {
         Some(c) if c.len() < data.len() => (c, FLAG_ZSTD),
         _ => (data, 0),
@@ -420,6 +432,41 @@ mod tests {
     /// Reads the ulen field of a record.
     fn r0ulen(rec: &[u8]) -> u32 {
         u32::from_be_bytes([rec[34], rec[35], rec[36], rec[37]])
+    }
+
+    #[test]
+    fn reused_compressor_preserves_independent_frames() {
+        let threads: Vec<_> = (0..4)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    for size in [0, 256, 4096, 1 << 20, 17, 65536, 0] {
+                        for data in [compressible(size), incompressible(size)] {
+                            let key = mk_key(&data);
+                            let bytes = encode_record(key, &data).unwrap();
+                            let record = parse_record(&bytes).unwrap();
+                            let expected =
+                                zstd::bulk::compress(&data, zstd::DEFAULT_COMPRESSION_LEVEL)
+                                    .unwrap();
+                            let (payload, flags) = if expected.len() < data.len() {
+                                (expected.as_slice(), FLAG_ZSTD)
+                            } else {
+                                (data.as_slice(), 0)
+                            };
+                            assert_eq!(record.key, key);
+                            assert_eq!(record.flags, flags);
+                            assert_eq!(&bytes[REC_HEADER_SIZE..], payload);
+                            assert_eq!(
+                                decode_payload(record.flags, record.ulen, payload).unwrap(),
+                                data
+                            );
+                        }
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
     }
 
     fn wire_pack(body: &[u8]) -> Vec<u8> {
