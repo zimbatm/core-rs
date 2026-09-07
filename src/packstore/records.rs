@@ -25,6 +25,29 @@ pub struct Records {
     locations: std::vec::IntoIter<Location>,
 }
 
+impl Records {
+    /// Copies records through the destination's full record validation path.
+    /// Sealed payloads borrow their mappings; active reads reuse one buffer.
+    /// An error can leave a copied prefix. Sync the destination before publishing references.
+    pub fn copy_to_unflushed(self, destination: &Store) -> Result<(), Error> {
+        let mut buffer = Vec::new();
+        for location in self.locations {
+            let bytes = match &self.segments[location.segment] {
+                Segment::Active(segment) => {
+                    buffer.resize(REC_HEADER_SIZE + location.stored_length as usize, 0);
+                    segment.f.read_exact_at(&mut buffer, location.offset)?;
+                    &buffer[..]
+                }
+                Segment::Sealed(segment) => {
+                    segment.record_bytes_at(location.offset, location.stored_length)?
+                }
+            };
+            destination.put_record_unflushed(location.key, bytes)?;
+        }
+        Ok(())
+    }
+}
+
 impl Iterator for Records {
     type Item = Result<(Key, Vec<u8>), Error>;
 

@@ -769,8 +769,14 @@ impl Store {
                 "encoded record key or length mismatch".into(),
             ));
         }
-        let data = decode_payload(record.flags, record.ulen, &bytes[REC_HEADER_SIZE..])
-            .map_err(Error::Pack)?;
+        let payload = &bytes[REC_HEADER_SIZE..];
+        let data = if record.flags == 0 {
+            std::borrow::Cow::Borrowed(payload)
+        } else {
+            std::borrow::Cow::Owned(
+                decode_payload(record.flags, record.ulen, payload).map_err(Error::Pack)?,
+            )
+        };
         if Key::new(k.type_(), k.length(), &data) != k {
             return Err(Error::Verify(
                 "encoded record payload checksum mismatch".into(),

@@ -422,8 +422,12 @@ impl SealedSegment {
     }
 
     pub(crate) fn record_at(&self, off: u64, slen: u32) -> Result<Vec<u8>, Error> {
+        self.record_bytes_at(off, slen).map(<[u8]>::to_vec)
+    }
+
+    pub(crate) fn record_bytes_at(&self, off: u64, slen: u32) -> Result<&[u8], Error> {
         let (start, end) = self.record_span(off, slen)?;
-        Ok(self.mm[start..end].to_vec())
+        Ok(&self.mm[start..end])
     }
 
     pub(crate) fn locate_record(&self, k: Key) -> Option<(u64, u32)> {

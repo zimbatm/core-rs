@@ -326,12 +326,22 @@ fn records_in_order_survive_rotation_wipe_and_close() {
         .into_iter()
         .map(|key| (key, store.get_record(key).unwrap()))
         .collect();
+    let copy = store.records_in_order(keys.clone()).unwrap();
     let records = store.records_in_order(keys).unwrap();
     assert_eq!(records.len(), expected.len());
     let object = blob_obj(&incompressible(4096));
     store.put(object.key, &object.data).unwrap();
     store.wipe().unwrap();
     store.close().unwrap();
+    let target_dir = TempDir::new().unwrap();
+    let target = Store::open(target_dir.path()).unwrap();
+    copy.copy_to_unflushed(&target).unwrap();
+    target.sync().unwrap();
+    target.close().unwrap();
+    let target = Store::open(target_dir.path()).unwrap();
+    for (key, bytes) in &expected {
+        assert_eq!(target.get_record(*key).unwrap(), *bytes);
+    }
     assert_eq!(records.collect::<Result<Vec<_>, _>>().unwrap(), expected);
     assert!(matches!(
         store.records_in_order(Vec::new()),
