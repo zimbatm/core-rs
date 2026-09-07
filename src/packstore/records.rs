@@ -55,7 +55,8 @@ impl Store {
     /// Resolves each key once and retains its location for subsequent reads.
     /// Rejects missing keys and closed stores before returning a reader.
     /// Duplicate input keys produce duplicate records.
-    pub fn records_in_order(&self, keys: impl IntoIterator<Item = Key>) -> Result<Records, Error> {
+    /// Materialized input prevents caller iterator code from running under store locks.
+    pub fn records_in_order(&self, keys: Vec<Key>) -> Result<Records, Error> {
         let shared = unpoison(self.shared.read());
         if shared.closed {
             return Err(Error::Closed);

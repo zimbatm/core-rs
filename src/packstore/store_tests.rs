@@ -333,18 +333,21 @@ fn records_in_order_survive_rotation_wipe_and_close() {
     store.wipe().unwrap();
     store.close().unwrap();
     assert_eq!(records.collect::<Result<Vec<_>, _>>().unwrap(), expected);
-    assert!(matches!(store.records_in_order([]), Err(Error::Closed)));
+    assert!(matches!(
+        store.records_in_order(Vec::new()),
+        Err(Error::Closed)
+    ));
 }
 
 #[test]
 fn records_in_order_reject_missing_keys() {
     let dir = TempDir::new().unwrap();
     let store = Store::open(dir.path()).unwrap();
-    assert_eq!(store.records_in_order([]).unwrap().count(), 0);
+    assert_eq!(store.records_in_order(Vec::new()).unwrap().count(), 0);
     let present = blob_obj(b"present");
     store.put(present.key, &present.data).unwrap();
     assert!(matches!(
-        store.records_in_order([present.key, blob_obj(b"missing").key]),
+        store.records_in_order(vec![present.key, blob_obj(b"missing").key]),
         Err(Error::NotFound)
     ));
 }
