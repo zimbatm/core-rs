@@ -415,14 +415,22 @@ impl SealedSegment {
     /// not CRC-check; the record is validated by the receiving reader on the
     /// push path (Go: `getRecord`).
     pub(crate) fn get_record(&self, k: Key) -> Result<Option<Vec<u8>>, Error> {
-        if !self.fv.filter.contains(filter_key(k)) {
-            return Ok(None);
-        }
-        let Some((off, slen)) = self.fv.lookup(&self.mm, k) else {
+        let Some((off, slen)) = self.locate_record(k) else {
             return Ok(None);
         };
+        self.record_at(off, slen).map(Some)
+    }
+
+    pub(crate) fn record_at(&self, off: u64, slen: u32) -> Result<Vec<u8>, Error> {
         let (start, end) = self.record_span(off, slen)?;
-        Ok(Some(self.mm[start..end].to_vec()))
+        Ok(self.mm[start..end].to_vec())
+    }
+
+    pub(crate) fn locate_record(&self, k: Key) -> Option<(u64, u32)> {
+        if !self.fv.filter.contains(filter_key(k)) {
+            return None;
+        }
+        self.fv.lookup(&self.mm, k)
     }
 
     /// Returns `k`'s stored (post-compression) payload length if present,

@@ -18,6 +18,7 @@ mod gc;
 mod markset;
 mod missing;
 mod parallel;
+mod records;
 mod recover;
 mod verify;
 
@@ -39,6 +40,7 @@ use crate::amberpack::{self, REC_HEADER_SIZE, decode_payload, encode_record};
 use crate::key::Key;
 
 use footer::SealedSegment;
+pub use records::Records;
 use recover::{ActiveLoc, scan_active};
 
 /// First byte of the footer (Go: `tagSeal`).

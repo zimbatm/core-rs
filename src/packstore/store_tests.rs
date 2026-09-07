@@ -301,6 +301,55 @@ fn sort_by_location_orders_by_disk_layout() {
 }
 
 #[test]
+fn records_in_order_survive_rotation_wipe_and_close() {
+    let dir = TempDir::new().unwrap();
+    let store = Store::open_with(dir.path(), Options::default().segment_size(2048)).unwrap();
+    let mut keys = Vec::new();
+    for i in 0..30u8 {
+        let mut data = if i % 2 == 0 {
+            compressible(1500)
+        } else {
+            incompressible(1500)
+        };
+        data.push(i);
+        let object = blob_obj(&data);
+        store.put(object.key, &object.data).unwrap();
+        keys.push(object.key);
+    }
+    assert!(!sealed_files(dir.path()).is_empty());
+    assert!(!active_files(dir.path()).is_empty());
+    keys.reverse();
+    keys.push(keys[0]);
+    let mut sorted = keys.clone();
+    store.sort_by_location(&mut sorted);
+    let expected: Vec<_> = sorted
+        .into_iter()
+        .map(|key| (key, store.get_record(key).unwrap()))
+        .collect();
+    let records = store.records_in_order(keys).unwrap();
+    assert_eq!(records.len(), expected.len());
+    let object = blob_obj(&incompressible(4096));
+    store.put(object.key, &object.data).unwrap();
+    store.wipe().unwrap();
+    store.close().unwrap();
+    assert_eq!(records.collect::<Result<Vec<_>, _>>().unwrap(), expected);
+    assert!(matches!(store.records_in_order([]), Err(Error::Closed)));
+}
+
+#[test]
+fn records_in_order_reject_missing_keys() {
+    let dir = TempDir::new().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    assert_eq!(store.records_in_order([]).unwrap().count(), 0);
+    let present = blob_obj(b"present");
+    store.put(present.key, &present.data).unwrap();
+    assert!(matches!(
+        store.records_in_order([present.key, blob_obj(b"missing").key]),
+        Err(Error::NotFound)
+    ));
+}
+
+#[test]
 fn sort_by_location_puts_absent_keys_last() {
     let dir = TempDir::new().unwrap();
     let s = Store::open(dir.path()).unwrap();
