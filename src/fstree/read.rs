@@ -647,34 +647,70 @@ where
     }
 }
 
+/// Visits regular-file Blob leaves in order without buffering the complete file.
+/// Errors terminate the iterator; unread leaves are not fetched.
+pub fn content_chunks<G, E>(key: Key, get: G) -> ContentChunks<G>
+where
+    G: FnMut(Key) -> Result<Vec<u8>, E>,
+{
+    ContentChunks {
+        pending: vec![key],
+        get,
+    }
+}
+
+/// A lazy traversal of a Blob or FileNode's content leaves.
+pub struct ContentChunks<G> {
+    pending: Vec<Key>,
+    get: G,
+}
+
+impl<G, E> Iterator for ContentChunks<G>
+where
+    G: FnMut(Key) -> Result<Vec<u8>, E>,
+{
+    type Item = Result<Vec<u8>, WalkError<E>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(key) = self.pending.pop() {
+            let result = (|| {
+                let data =
+                    (self.get)(key).map_err(|source| WalkError::ContentRead { key, source })?;
+                match key.type_() {
+                    Type::Blob => Ok(Some(data)),
+                    Type::FileNode => {
+                        let children = decode_file_node(&data).map_err(WalkError::Codec)?;
+                        self.pending.extend(children.into_iter().rev());
+                        Ok(None)
+                    }
+                    _ => Err(WalkError::NotContentObject { key }),
+                }
+            })();
+            match result {
+                Ok(Some(data)) => return Some(Ok(data)),
+                Ok(None) => {}
+                Err(error) => {
+                    self.pending.clear();
+                    return Some(Err(error));
+                }
+            }
+        }
+        None
+    }
+}
+
 /// Writes the regular-file content addressed by `k` to `w`, descending
 /// FileNode index levels and concatenating Blob leaves in order. `k` must be
 /// a Blob or FileNode object.
-pub fn write_content<W, G, E>(w: &mut W, k: Key, mut get: G) -> Result<(), WalkError<E>>
+pub fn write_content<W, G, E>(w: &mut W, k: Key, get: G) -> Result<(), WalkError<E>>
 where
     W: io::Write + ?Sized,
     G: FnMut(Key) -> Result<Vec<u8>, E>,
 {
-    content_inner(w, k, &mut get)
-}
-
-fn content_inner<W, G, E>(w: &mut W, k: Key, get: &mut G) -> Result<(), WalkError<E>>
-where
-    W: io::Write + ?Sized,
-    G: FnMut(Key) -> Result<Vec<u8>, E>,
-{
-    let data = get(k).map_err(|source| WalkError::ContentRead { key: k, source })?;
-    match k.type_() {
-        Type::Blob => w.write_all(&data).map_err(WalkError::Io),
-        Type::FileNode => {
-            let children = decode_file_node(&data).map_err(WalkError::Codec)?;
-            for ck in children {
-                content_inner(w, ck, get)?;
-            }
-            Ok(())
-        }
-        _ => Err(WalkError::NotContentObject { key: k }),
+    for chunk in content_chunks(k, get) {
+        w.write_all(&chunk?).map_err(WalkError::Io)?;
     }
+    Ok(())
 }
 
 /// Returns the keys of every object reachable from `root` — the set that must
@@ -1423,6 +1459,39 @@ mod tests {
     }
 
     // --- write_content ---
+
+    #[test]
+    fn content_chunks_are_lazy_ordered_and_stop_on_error() {
+        use std::cell::Cell;
+        let first = encode_blob(b"first");
+        let second = encode_blob(b"second");
+        let nested = encode_file_node(&[first.key, second.key]);
+        let root = encode_file_node(&[nested.key, first.key]);
+        let store = MemStore::of(&[&first, &second, &nested, &root]);
+        let reads = Cell::new(0);
+        let mut chunks = content_chunks(root.key, |key| {
+            reads.set(reads.get() + 1);
+            store.get()(key)
+        });
+        assert_eq!(reads.get(), 0);
+        assert_eq!(chunks.next().unwrap().unwrap(), b"first");
+        assert_eq!(reads.get(), 3);
+        assert_eq!(chunks.next().unwrap().unwrap(), b"second");
+        assert_eq!(chunks.next().unwrap().unwrap(), b"first");
+        assert!(chunks.next().is_none());
+        assert_eq!(reads.get(), 5);
+
+        let mut chunks = content_chunks(root.key, |key| {
+            if key == second.key {
+                Err("unavailable".to_owned())
+            } else {
+                store.get()(key)
+            }
+        });
+        assert_eq!(chunks.next().unwrap().unwrap(), b"first");
+        assert!(chunks.next().unwrap().is_err());
+        assert!(chunks.next().is_none());
+    }
 
     #[test]
     fn write_content_concatenates_blobs() {
