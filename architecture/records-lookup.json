@@ -1,0 +1,77 @@
+{
+  "encoded_records_identical": true,
+  "objects": 94342,
+  "samples": [
+    {
+      "round": 0,
+      "seconds": 0.090023452,
+      "sorted": false
+    },
+    {
+      "round": 0,
+      "seconds": 0.077121887,
+      "sorted": true
+    },
+    {
+      "round": 1,
+      "seconds": 0.075959999,
+      "sorted": true
+    },
+    {
+      "round": 1,
+      "seconds": 0.074585335,
+      "sorted": false
+    },
+    {
+      "round": 2,
+      "seconds": 0.074783082,
+      "sorted": false
+    },
+    {
+      "round": 2,
+      "seconds": 0.075775877,
+      "sorted": true
+    },
+    {
+      "round": 3,
+      "seconds": 0.072824402,
+      "sorted": true
+    },
+    {
+      "round": 3,
+      "seconds": 0.070877935,
+      "sorted": false
+    },
+    {
+      "round": 4,
+      "seconds": 0.071391266,
+      "sorted": false
+    },
+    {
+      "round": 4,
+      "seconds": 0.072872925,
+      "sorted": true
+    },
+    {
+      "round": 5,
+      "seconds": 0.072731394,
+      "sorted": true
+    },
+    {
+      "round": 5,
+      "seconds": 0.071099899,
+      "sorted": false
+    },
+    {
+      "round": 6,
+      "seconds": 0.071345348,
+      "sorted": false
+    },
+    {
+      "round": 6,
+      "seconds": 0.072976913,
+      "sorted": true
+    }
+  ],
+  "scope": "Warm-host record lookup only. Includes input cloning and candidate sorting. Excludes store opening, reachability, record reads, and copying."
+}
