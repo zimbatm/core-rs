@@ -31,7 +31,13 @@ pub struct Records {
 /// Dropping the view releases its handles, including unlinked segment files.
 pub struct RecordView {
     segments: Vec<Segment>,
-    locations: std::collections::HashMap<Key, Location>,
+    locations: std::collections::HashMap<Key, RecordLocation>,
+}
+
+struct RecordLocation {
+    segment: usize,
+    offset: u64,
+    stored_length: u32,
 }
 
 impl RecordView {
@@ -67,9 +73,15 @@ impl Records {
             segments,
             locations: self
                 .locations
-                .map(|mut location| {
-                    location.segment = indices[location.segment];
-                    (location.key, location)
+                .map(|location| {
+                    (
+                        location.key,
+                        RecordLocation {
+                            segment: indices[location.segment],
+                            offset: location.offset,
+                            stored_length: location.stored_length,
+                        },
+                    )
                 })
                 .collect(),
         }

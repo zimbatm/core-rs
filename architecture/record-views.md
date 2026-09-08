@@ -34,3 +34,13 @@ The library suite contains 427 tests.
 Coverage includes excluded existing keys, excluded later keys, empty views, duplicate selections, active and sealed segments, rotation, compaction, wipe, and closure.
 The production Forge checkout does not yet use this API.
 No end-to-end performance improvement is claimed.
+
+## Index key ownership
+
+RecordView stores each key once in its hash map.
+The value contains only segment, offset, and stored length.
+The previous value also held a duplicate 32-byte key.
+For 94,342 selected objects, the removed key fields total 3,018,944 bytes.
+This is a representation calculation, not a process RSS measurement.
+Actual allocation also depends on hash-map capacity, padding, and allocator behavior.
+The full core test suite passed after this change on 2026-09-08.
