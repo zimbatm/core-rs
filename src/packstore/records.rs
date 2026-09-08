@@ -25,7 +25,56 @@ pub struct Records {
     locations: std::vec::IntoIter<Location>,
 }
 
+/// A fixed set of encoded records with retained segment handles.
+/// Keys outside the captured set return NotFound, even if the store has them.
+/// Reads do not validate payloads; receivers must validate before publication.
+/// Dropping the view releases its handles, including unlinked segment files.
+pub struct RecordView {
+    segments: Vec<Segment>,
+    locations: std::collections::HashMap<Key, Location>,
+}
+
+impl RecordView {
+    pub fn get_record(&self, key: Key) -> Result<Vec<u8>, Error> {
+        let location = self.locations.get(&key).ok_or(Error::NotFound)?;
+        match &self.segments[location.segment] {
+            Segment::Active(segment) => {
+                let mut bytes = vec![0; REC_HEADER_SIZE + location.stored_length as usize];
+                segment.f.read_exact_at(&mut bytes, location.offset)?;
+                Ok(bytes)
+            }
+            Segment::Sealed(segment) => segment.record_at(location.offset, location.stored_length),
+        }
+    }
+}
+
 impl Records {
+    /// Converts captured locations into a random-access view without reading payloads.
+    /// Duplicate keys share one location in the resulting view.
+    pub fn into_view(self) -> RecordView {
+        let mut indices = vec![usize::MAX; self.segments.len()];
+        for location in self.locations.as_slice() {
+            indices[location.segment] = 0;
+        }
+        let mut segments = Vec::new();
+        for (index, segment) in self.segments.into_iter().enumerate() {
+            if indices[index] != usize::MAX {
+                indices[index] = segments.len();
+                segments.push(segment);
+            }
+        }
+        RecordView {
+            segments,
+            locations: self
+                .locations
+                .map(|mut location| {
+                    location.segment = indices[location.segment];
+                    (location.key, location)
+                })
+                .collect(),
+        }
+    }
+
     /// Copies records through the destination's full record validation path.
     /// Sealed payloads borrow their mappings; active reads reuse one buffer.
     /// An error can leave a copied prefix. Sync the destination before publishing references.

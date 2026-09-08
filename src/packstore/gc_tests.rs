@@ -815,3 +815,24 @@ fn compact_during_reads() {
         done.store(true, Ordering::Relaxed);
     });
 }
+
+#[test]
+fn record_view_survives_collection_without_expanding_scope() {
+    let (_dir, store, objects) = compact_store();
+    let key = objects[0].key;
+    let expected = store.get_record(key).unwrap();
+    let view = store.records_in_order(vec![key, key]).unwrap().into_view();
+    assert!(matches!(
+        view.get_record(objects[1].key),
+        Err(super::Error::NotFound)
+    ));
+    store.compact(|_| false, CompactOpts::default()).unwrap();
+    assert!(!store.has(key).unwrap());
+    assert_eq!(view.get_record(key).unwrap(), expected);
+    store.close().unwrap();
+    assert_eq!(view.get_record(key).unwrap(), expected);
+    assert!(matches!(
+        view.get_record(objects[1].key),
+        Err(super::Error::NotFound)
+    ));
+}
