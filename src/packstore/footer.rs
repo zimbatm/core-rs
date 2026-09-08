@@ -242,55 +242,46 @@ impl FooterView {
     }
 }
 
-struct FooterLayout<'a> {
-    mm: &'a [u8],
-    index_off: u64,
-    index_len: u64,
-    filter_off: u64,
-    filter_len: u64,
-    key_count: u64,
-    body_len: u64,
-    expected_crc: u32,
-}
+/// Validates a whole sealed-segment image (header through trailer) and
+/// returns its footer view. `mm` may be a read-only mmap; nothing is mutated
+/// (Go: `parseFooter`).
+pub(crate) fn parse_footer(mm: &[u8]) -> Result<FooterView, Error> {
+    if mm.len() < MIN_SEALED_LEN {
+        return Err(corrupt(format!("file too short: {} bytes", mm.len())));
+    }
+    if mm[..MAGIC_HEADER.len()] != MAGIC_HEADER {
+        return Err(corrupt("bad header magic"));
+    }
+    let tr = &mm[mm.len() - TRAILER_SIZE..];
+    if tr[56..64] != MAGIC_TRAILER {
+        return Err(corrupt("bad trailer magic"));
+    }
+    if be_u32(tr, 52) != 0 {
+        return Err(corrupt("nonzero reserved trailer field"));
+    }
+    let read_u64 = |off: usize| {
+        u64::from_be_bytes([
+            tr[off],
+            tr[off + 1],
+            tr[off + 2],
+            tr[off + 3],
+            tr[off + 4],
+            tr[off + 5],
+            tr[off + 6],
+            tr[off + 7],
+        ])
+    };
+    let index_off = read_u64(0);
+    let index_len = read_u64(8);
+    let filter_off = read_u64(16);
+    let filter_len = read_u64(24);
+    let key_count = read_u64(32);
+    let body_len = read_u64(40);
 
-impl<'a> FooterLayout<'a> {
-    fn parse(mm: &'a [u8]) -> Result<Self, Error> {
-        if mm.len() < MIN_SEALED_LEN {
-            return Err(corrupt(format!("file too short: {} bytes", mm.len())));
-        }
-        if mm[..MAGIC_HEADER.len()] != MAGIC_HEADER {
-            return Err(corrupt("bad header magic"));
-        }
-        let tr = &mm[mm.len() - TRAILER_SIZE..];
-        if tr[56..64] != MAGIC_TRAILER {
-            return Err(corrupt("bad trailer magic"));
-        }
-        if be_u32(tr, 52) != 0 {
-            return Err(corrupt("nonzero reserved trailer field"));
-        }
-        let read_u64 = |off: usize| {
-            u64::from_be_bytes([
-                tr[off],
-                tr[off + 1],
-                tr[off + 2],
-                tr[off + 3],
-                tr[off + 4],
-                tr[off + 5],
-                tr[off + 6],
-                tr[off + 7],
-            ])
-        };
-        let index_off = read_u64(0);
-        let index_len = read_u64(8);
-        let filter_off = read_u64(16);
-        let filter_len = read_u64(24);
-        let key_count = read_u64(32);
-        let body_len = read_u64(40);
-
-        let file_len = mm.len() as u64;
-        // Checked in Go's order with Go's short-circuiting: each later expression
-        // relies on the earlier ones for overflow freedom.
-        if body_len < MAGIC_HEADER.len() as u64
+    let file_len = mm.len() as u64;
+    // Checked in Go's order with Go's short-circuiting: each later expression
+    // relies on the earlier ones for overflow freedom.
+    if body_len < MAGIC_HEADER.len() as u64
         || body_len >= file_len
         || key_count > u64::from(u32::MAX) // fanout counts are u32; also keeps the next line overflow-free
         || index_off != body_len + 1
@@ -298,59 +289,32 @@ impl<'a> FooterLayout<'a> {
         || filter_off != index_off + index_len
         || filter_off > file_len - TRAILER_SIZE as u64
         || filter_len != file_len - TRAILER_SIZE as u64 - filter_off
-        {
-            return Err(corrupt("trailer offsets inconsistent"));
-        }
-        Ok(Self {
-            mm,
-            index_off,
-            index_len,
-            filter_off,
-            filter_len,
-            key_count,
-            body_len,
-            expected_crc: be_u32(tr, 48),
-        })
+    {
+        return Err(corrupt("trailer offsets inconsistent"));
+    }
+    if crc_fast::crc32_iscsi(&mm[body_len as usize..mm.len() - 16]) != be_u32(tr, 48) {
+        return Err(corrupt("footer CRC mismatch"));
+    }
+    if mm[body_len as usize] != TAG_SEAL {
+        return Err(corrupt("missing seal marker"));
     }
 
-    fn validate(self) -> Result<FooterView, Error> {
-        let Self {
-            mm,
-            index_off,
-            index_len,
-            filter_off,
-            filter_len,
-            key_count,
-            body_len,
-            expected_crc,
-        } = self;
-        if crc_fast::crc32_iscsi(&mm[body_len as usize..mm.len() - 16]) != expected_crc {
-            return Err(corrupt("footer CRC mismatch"));
-        }
-        if mm[body_len as usize] != TAG_SEAL {
-            return Err(corrupt("missing seal marker"));
-        }
-
-        let (fanout, _) = parse_index_section(
-            &mm[index_off as usize..(index_off + index_len) as usize],
-            key_count,
-        )?;
-        let filter =
-            parse_filter_section(&mm[filter_off as usize..(filter_off + filter_len) as usize])?;
-        Ok(FooterView {
-            fanout,
-            entries_off: index_off as usize + FANOUT_SIZE,
-            entries_len: index_len as usize - FANOUT_SIZE,
-            filter,
-            key_count,
-            body_len,
-            index_off,
-            index_len,
-        })
-    }
-}
-pub(crate) fn parse_footer(mm: &[u8]) -> Result<FooterView, Error> {
-    FooterLayout::parse(mm)?.validate()
+    let (fanout, _) = parse_index_section(
+        &mm[index_off as usize..(index_off + index_len) as usize],
+        key_count,
+    )?;
+    let filter =
+        parse_filter_section(&mm[filter_off as usize..(filter_off + filter_len) as usize])?;
+    Ok(FooterView {
+        fanout,
+        entries_off: index_off as usize + FANOUT_SIZE,
+        entries_len: index_len as usize - FANOUT_SIZE,
+        filter,
+        key_count,
+        body_len,
+        index_off,
+        index_len,
+    })
 }
 
 /// An immutable, fully mmap'd sealed segment (Go: `sealedSegment`).
@@ -398,17 +362,7 @@ impl SealedSegment {
                 TRAILER_SIZE,
             )?;
         }
-        let fv = (|| {
-            let layout = FooterLayout::parse(&mm)?;
-            #[cfg(target_os = "linux")]
-            mm.advise_range(
-                memmap2::Advice::Sequential,
-                layout.body_len as usize,
-                mm.len() - layout.body_len as usize,
-            )?;
-            layout.validate()
-        })()
-        .map_err(|e| Error::Context {
+        let fv = parse_footer(&mm).map_err(|e| Error::Context {
             msg: path.display().to_string(),
             source: Box::new(e),
         })?;
