@@ -1,0 +1,171 @@
+{
+  "compression_level": 3,
+  "correctness": "identical_frames_and_round_trip",
+  "measurements": [
+    {
+      "mode": "one_shot",
+      "output_bytes": 2560000,
+      "record_bytes": 256,
+      "records": 10000,
+      "round": 0,
+      "seconds": 0.028358129,
+      "uncompressed_bytes": 2560000
+    },
+    {
+      "mode": "reused_context",
+      "output_bytes": 2560000,
+      "record_bytes": 256,
+      "records": 10000,
+      "round": 0,
+      "seconds": 0.001378922,
+      "uncompressed_bytes": 2560000
+    },
+    {
+      "mode": "reused_context",
+      "output_bytes": 2560000,
+      "record_bytes": 256,
+      "records": 10000,
+      "round": 1,
+      "seconds": 0.00132426,
+      "uncompressed_bytes": 2560000
+    },
+    {
+      "mode": "one_shot",
+      "output_bytes": 2560000,
+      "record_bytes": 256,
+      "records": 10000,
+      "round": 1,
+      "seconds": 0.027422503,
+      "uncompressed_bytes": 2560000
+    },
+    {
+      "mode": "one_shot",
+      "output_bytes": 2560000,
+      "record_bytes": 256,
+      "records": 10000,
+      "round": 2,
+      "seconds": 0.027432839,
+      "uncompressed_bytes": 2560000
+    },
+    {
+      "mode": "reused_context",
+      "output_bytes": 2560000,
+      "record_bytes": 256,
+      "records": 10000,
+      "round": 2,
+      "seconds": 0.002160846,
+      "uncompressed_bytes": 2560000
+    },
+    {
+      "mode": "one_shot",
+      "output_bytes": 40960000,
+      "record_bytes": 4096,
+      "records": 10000,
+      "round": 0,
+      "seconds": 0.047245502,
+      "uncompressed_bytes": 40960000
+    },
+    {
+      "mode": "reused_context",
+      "output_bytes": 40960000,
+      "record_bytes": 4096,
+      "records": 10000,
+      "round": 0,
+      "seconds": 0.01631603,
+      "uncompressed_bytes": 40960000
+    },
+    {
+      "mode": "reused_context",
+      "output_bytes": 40960000,
+      "record_bytes": 4096,
+      "records": 10000,
+      "round": 1,
+      "seconds": 0.015401224,
+      "uncompressed_bytes": 40960000
+    },
+    {
+      "mode": "one_shot",
+      "output_bytes": 40960000,
+      "record_bytes": 4096,
+      "records": 10000,
+      "round": 1,
+      "seconds": 0.042850088,
+      "uncompressed_bytes": 40960000
+    },
+    {
+      "mode": "one_shot",
+      "output_bytes": 40960000,
+      "record_bytes": 4096,
+      "records": 10000,
+      "round": 2,
+      "seconds": 0.042487716,
+      "uncompressed_bytes": 40960000
+    },
+    {
+      "mode": "reused_context",
+      "output_bytes": 40960000,
+      "record_bytes": 4096,
+      "records": 10000,
+      "round": 2,
+      "seconds": 0.015396999,
+      "uncompressed_bytes": 40960000
+    },
+    {
+      "mode": "one_shot",
+      "output_bytes": 655360000,
+      "record_bytes": 65536,
+      "records": 10000,
+      "round": 0,
+      "seconds": 0.200285496,
+      "uncompressed_bytes": 655360000
+    },
+    {
+      "mode": "reused_context",
+      "output_bytes": 655360000,
+      "record_bytes": 65536,
+      "records": 10000,
+      "round": 0,
+      "seconds": 0.176216107,
+      "uncompressed_bytes": 655360000
+    },
+    {
+      "mode": "reused_context",
+      "output_bytes": 655360000,
+      "record_bytes": 65536,
+      "records": 10000,
+      "round": 1,
+      "seconds": 0.169026349,
+      "uncompressed_bytes": 655360000
+    },
+    {
+      "mode": "one_shot",
+      "output_bytes": 655360000,
+      "record_bytes": 65536,
+      "records": 10000,
+      "round": 1,
+      "seconds": 0.197277577,
+      "uncompressed_bytes": 655360000
+    },
+    {
+      "mode": "one_shot",
+      "output_bytes": 655360000,
+      "record_bytes": 65536,
+      "records": 10000,
+      "round": 2,
+      "seconds": 0.198500856,
+      "uncompressed_bytes": 655360000
+    },
+    {
+      "mode": "reused_context",
+      "output_bytes": 655360000,
+      "record_bytes": 65536,
+      "records": 10000,
+      "round": 2,
+      "seconds": 0.17668898,
+      "uncompressed_bytes": 655360000
+    }
+  ],
+  "method": "Synthetic corpus: 32 varying records per size, one quarter random bytes, others mixed text and random fields. Three rounds with alternating mode order. Context initialization is timed; input generation and correctness checks are excluded. No filesystem I/O is timed.",
+  "operation": "decompress",
+  "schema": 2
+}

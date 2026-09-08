@@ -33,6 +33,7 @@ use std::io::{self, BufReader, BufWriter, Read, Write};
 thread_local! {
     // Each writer reuses its workspace without serializing independent threads.
     static COMPRESSOR: RefCell<Option<zstd::bulk::Compressor<'static>>> = const { RefCell::new(None) };
+    static DECOMPRESSOR: RefCell<Option<zstd::bulk::Decompressor<'static>>> = const { RefCell::new(None) };
 }
 
 use crate::key::Key;
@@ -220,7 +221,14 @@ pub fn decode_payload(flags: u8, ulen: u32, stored: &[u8]) -> Result<Vec<u8>, Er
     // past the header's claim fails inside zstd rather than allocating; either
     // way the record is Corrupt (Go decodes fully, then reports the length
     // mismatch — same class, slightly different message in that edge).
-    let out = zstd::bulk::decompress(stored, ulen as usize)
+    let out = DECOMPRESSOR
+        .with(|slot| -> io::Result<Vec<u8>> {
+            let mut slot = slot.borrow_mut();
+            if slot.is_none() {
+                *slot = Some(zstd::bulk::Decompressor::new()?);
+            }
+            slot.as_mut().unwrap().decompress(stored, ulen as usize)
+        })
         .map_err(|e| Error::Corrupt(format!("zstd: {e}")))?;
     if out.len() != ulen as usize {
         return Err(Error::Corrupt(format!(
@@ -705,6 +713,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn decode_workspace_recovers_and_keeps_threads_independent() {
+        let workers: Vec<_> = (0..4u8)
+            .map(|seed| {
+                std::thread::spawn(move || {
+                    for size in [256, 65536, 4096, 0, 256] {
+                        let data = vec![seed; size];
+                        let frame =
+                            zstd::bulk::compress(&data, zstd::DEFAULT_COMPRESSION_LEVEL).unwrap();
+                        assert!(decode_payload(FLAG_ZSTD, size as u32, b"invalid frame").is_err());
+                        assert_eq!(
+                            decode_payload(FLAG_ZSTD, size as u32, &frame).unwrap(),
+                            data
+                        );
+                        if size > 0 {
+                            assert!(decode_payload(FLAG_ZSTD, (size - 1) as u32, &frame).is_err());
+                            assert_eq!(
+                                decode_payload(FLAG_ZSTD, size as u32, &frame).unwrap(),
+                                zstd::bulk::decompress(&frame, size).unwrap()
+                            );
+                        }
+                    }
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+    }
     #[test]
     fn decode_payload_raw_copies() {
         // Go guards against aliasing an mmap slice; the Rust raw path likewise
