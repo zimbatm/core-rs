@@ -157,7 +157,7 @@ pub fn encode_record(k: Key, data: &[u8]) -> Result<Vec<u8>, Error> {
     rec[38..42].copy_from_slice(&(payload.len() as u32).to_be_bytes());
     rec[REC_HEADER_SIZE..].copy_from_slice(payload);
     // CRC over the whole record; the crc field itself is still zero here.
-    let crc = crc32c::crc32c(&rec);
+    let crc = crc_fast::crc32_iscsi(&rec);
     rec[42..46].copy_from_slice(&crc.to_be_bytes());
     Ok(rec)
 }
@@ -196,10 +196,11 @@ pub fn parse_record(b: &[u8]) -> Result<Record, Error> {
             "compressed record with slen {slen} >= ulen {ulen}"
         )));
     }
-    let mut c = crc32c::crc32c(&b[..42]);
-    c = crc32c::crc32c_append(c, &[0u8; 4]);
-    c = crc32c::crc32c_append(c, &b[REC_HEADER_SIZE..REC_HEADER_SIZE + slen as usize]);
-    if c != u32::from_be_bytes([b[42], b[43], b[44], b[45]]) {
+    let mut c = crc_fast::Digest::new(crc_fast::CrcAlgorithm::Crc32Iscsi);
+    c.update(&b[..42]);
+    c.update(&[0u8; 4]);
+    c.update(&b[REC_HEADER_SIZE..REC_HEADER_SIZE + slen as usize]);
+    if c.finalize() != u64::from(u32::from_be_bytes([b[42], b[43], b[44], b[45]])) {
         return Err(Error::Corrupt("record CRC mismatch".into()));
     }
     let key = Key::parse(&b[1..33]).map_err(|e| Error::Corrupt(format!("record key: {e}")))?;

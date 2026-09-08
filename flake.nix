@@ -36,6 +36,27 @@
         }
       );
 
+      packages = eachSystem (
+        system: pkgs: {
+          checksum-bench = pkgs.rustPlatform.buildRustPackage {
+            pname = "amber-core-checksum-bench";
+            version = "0.1.0";
+            src = self;
+            cargoLock.lockFile = ./Cargo.lock;
+            cargoBuildFlags = [
+              "--example"
+              "checksum-throughput"
+            ];
+            doCheck = false;
+            installPhase = ''
+              runHook preInstall
+              install -Dm755 target/${pkgs.stdenv.hostPlatform.rust.rustcTarget}/release/examples/checksum-throughput $out/bin/checksum-throughput
+              runHook postInstall
+            '';
+          };
+        }
+      );
+
       devShells = eachSystem (
         system: pkgs: {
           default = pkgs.mkShell {

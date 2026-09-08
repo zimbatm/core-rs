@@ -207,7 +207,7 @@ pub(crate) fn build_footer(body_len: u64, entries: &[IndexEntry]) -> Result<Vec<
     // excluding the crc field itself; reserved and magic are checked
     // explicitly on parse.
     let crc_at = ftr.len() - 16;
-    let crc = crc32c::crc32c(&ftr[..crc_at]);
+    let crc = crc_fast::crc32_iscsi(&ftr[..crc_at]);
     ftr[crc_at..crc_at + 4].copy_from_slice(&crc.to_be_bytes());
     Ok(ftr)
 }
@@ -292,7 +292,7 @@ pub(crate) fn parse_footer(mm: &[u8]) -> Result<FooterView, Error> {
     {
         return Err(corrupt("trailer offsets inconsistent"));
     }
-    if crc32c::crc32c(&mm[body_len as usize..mm.len() - 16]) != be_u32(tr, 48) {
+    if crc_fast::crc32_iscsi(&mm[body_len as usize..mm.len() - 16]) != be_u32(tr, 48) {
         return Err(corrupt("footer CRC mismatch"));
     }
     if mm[body_len as usize] != TAG_SEAL {
