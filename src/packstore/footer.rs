@@ -3,6 +3,7 @@
 //! `packstore/footer.go`).
 
 use std::fs::File;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use memmap2::Mmap;
@@ -322,6 +323,8 @@ pub(crate) struct SealedSegment {
     pub id: u64,
     pub path: PathBuf,
     pub mm: Mmap,
+    pub device: u64,
+    pub inode: u64,
     pub fv: FooterView,
 }
 
@@ -371,6 +374,8 @@ impl SealedSegment {
         Ok(SealedSegment {
             id,
             path: path.to_path_buf(),
+            device: st.dev(),
+            inode: st.ino(),
             mm,
             fv,
         })

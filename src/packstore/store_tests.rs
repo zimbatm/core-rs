@@ -2024,3 +2024,78 @@ fn write_parallel_syncs_once_per_run() {
     let n = s.fsyncs.load(std::sync::atomic::Ordering::Relaxed) - before;
     assert_eq!(n, 1, "{n} fsyncs for one small run, want 1");
 }
+
+#[test]
+fn segment_snapshot_retains_exact_files_after_wipe_and_close() {
+    use std::os::unix::fs::FileExt;
+    let dir = TempDir::new().unwrap();
+    let objects = test_objects(201);
+    let store =
+        Store::open_with(dir.path(), Options::new().segment_size(8 << 10).sync(false)).unwrap();
+    assert_eq!(store.seal_snapshot().unwrap().files().len(), 0);
+    for object in &objects[..200] {
+        store.put_unflushed(object.key, &object.data).unwrap();
+    }
+    let snapshot = store.seal_snapshot().unwrap();
+    assert!(snapshot.files().len() > 1);
+    assert!(active_files(dir.path()).is_empty());
+    let expected: Vec<_> = snapshot
+        .files()
+        .map(|(id, file)| {
+            assert!(
+                file.set_len(0).is_err(),
+                "snapshot handle must be read-only"
+            );
+            let mut bytes = vec![0; file.metadata().unwrap().len() as usize];
+            file.read_exact_at(&mut bytes, 0).unwrap();
+            (id, bytes)
+        })
+        .collect();
+    let next = &objects[200];
+    store.put_unflushed(next.key, &next.data).unwrap();
+    let extended = store.seal_snapshot().unwrap();
+    assert_eq!(extended.files().len(), snapshot.files().len() + 1);
+    store.wipe().unwrap();
+    assert!(!store.has(objects[0].key).unwrap());
+    store.close().unwrap();
+    assert!(matches!(store.seal_snapshot(), Err(Error::Closed)));
+    for ((id, file), (expected_id, bytes)) in snapshot.files().zip(expected) {
+        assert_eq!(id, expected_id);
+        let mut actual = vec![0; bytes.len()];
+        file.read_exact_at(&mut actual, 0).unwrap();
+        assert_eq!(actual, bytes);
+    }
+}
+
+#[test]
+fn segment_snapshot_rejects_replaced_paths() {
+    let dir = TempDir::new().unwrap();
+    let object = test_objects(1).remove(0);
+    let store = Store::open(dir.path()).unwrap();
+    store.put_unflushed(object.key, &object.data).unwrap();
+    let snapshot = store.seal_snapshot().unwrap();
+    let segment = sealed_files(dir.path()).remove(0);
+    let preserved = dir.path().join("preserved");
+    fs::rename(&segment, &preserved).unwrap();
+    fs::copy(&preserved, &segment).unwrap();
+    assert!(
+        store
+            .seal_snapshot()
+            .unwrap_err()
+            .to_string()
+            .contains("inode changed")
+    );
+    fs::remove_file(&segment).unwrap();
+    std::os::unix::fs::symlink(&preserved, &segment).unwrap();
+    assert!(store.seal_snapshot().is_err());
+    fs::remove_file(&segment).unwrap();
+    fs::rename(&preserved, &segment).unwrap();
+    assert_eq!(
+        store.seal_snapshot().unwrap().files().len(),
+        snapshot.files().len()
+    );
+    store.close().unwrap();
+    let reopened = Store::open(dir.path()).unwrap();
+    assert_eq!(reopened.get(object.key).unwrap(), object.data);
+    assert_eq!(reopened.seal_snapshot().unwrap().files().len(), 1);
+}

@@ -20,7 +20,9 @@ mod missing;
 mod parallel;
 mod records;
 mod recover;
+mod snapshot;
 mod verify;
+pub use snapshot::SegmentSnapshot;
 
 pub use compact::{CompactOpts, CompactStats, SegmentLiveness};
 pub use gc::SegmentInfo;
