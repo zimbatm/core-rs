@@ -352,10 +352,22 @@ impl SealedSegment {
         // truncation of a mapped segment is undefined behavior).
         let mm = unsafe { Mmap::map(&f) }
             .map_err(|e| Error::Other(format!("packstore: mmap {}: {e}", path.display())))?;
+        #[cfg(target_os = "linux")]
+        {
+            // Header and trailer probes must not read ahead into unrelated record bodies.
+            mm.advise_range(memmap2::Advice::Random, 0, MAGIC_HEADER.len())?;
+            mm.advise_range(
+                memmap2::Advice::Random,
+                mm.len() - TRAILER_SIZE,
+                TRAILER_SIZE,
+            )?;
+        }
         let fv = parse_footer(&mm).map_err(|e| Error::Context {
             msg: path.display().to_string(),
             source: Box::new(e),
         })?;
+        #[cfg(target_os = "linux")]
+        mm.advise(memmap2::Advice::Normal)?;
         Ok(SealedSegment {
             id,
             path: path.to_path_buf(),
