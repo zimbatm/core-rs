@@ -6,7 +6,8 @@
 //! `FnMut(Key) -> Result<Vec<u8>, E>` for the sequential paths, and
 //! `Fn(Key) -> Result<Vec<u8>, E> + Sync` for [`reachable_keys`] and
 //! [`check_complete`], whose Go counterparts require a getter that is safe
-//! for concurrent use.
+//! for concurrent use. Content streaming also accepts shared buffers through
+//! AsRef<[u8]>, preserving the getter's ownership without copying leaf bytes.
 
 use std::collections::HashSet;
 use std::fmt;
@@ -649,9 +650,10 @@ where
 
 /// Visits regular-file Blob leaves in order without buffering the complete file.
 /// Errors terminate the iterator; unread leaves are not fetched.
-pub fn content_chunks<G, E>(key: Key, get: G) -> ContentChunks<G>
+pub fn content_chunks<G, E, B>(key: Key, get: G) -> ContentChunks<G>
 where
-    G: FnMut(Key) -> Result<Vec<u8>, E>,
+    G: FnMut(Key) -> Result<B, E>,
+    B: AsRef<[u8]>,
 {
     ContentChunks {
         pending: vec![key],
@@ -665,11 +667,12 @@ pub struct ContentChunks<G> {
     get: G,
 }
 
-impl<G, E> Iterator for ContentChunks<G>
+impl<G, E, B> Iterator for ContentChunks<G>
 where
-    G: FnMut(Key) -> Result<Vec<u8>, E>,
+    G: FnMut(Key) -> Result<B, E>,
+    B: AsRef<[u8]>,
 {
-    type Item = Result<Vec<u8>, WalkError<E>>;
+    type Item = Result<B, WalkError<E>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         while let Some(key) = self.pending.pop() {
@@ -679,7 +682,7 @@ where
                 match key.type_() {
                     Type::Blob => Ok(Some(data)),
                     Type::FileNode => {
-                        let children = decode_file_node(&data).map_err(WalkError::Codec)?;
+                        let children = decode_file_node(data.as_ref()).map_err(WalkError::Codec)?;
                         self.pending.extend(children.into_iter().rev());
                         Ok(None)
                     }
@@ -702,13 +705,14 @@ where
 /// Writes the regular-file content addressed by `k` to `w`, descending
 /// FileNode index levels and concatenating Blob leaves in order. `k` must be
 /// a Blob or FileNode object.
-pub fn write_content<W, G, E>(w: &mut W, k: Key, get: G) -> Result<(), WalkError<E>>
+pub fn write_content<W, G, E, B>(w: &mut W, k: Key, get: G) -> Result<(), WalkError<E>>
 where
     W: io::Write + ?Sized,
-    G: FnMut(Key) -> Result<Vec<u8>, E>,
+    G: FnMut(Key) -> Result<B, E>,
+    B: AsRef<[u8]>,
 {
     for chunk in content_chunks(k, get) {
-        w.write_all(&chunk?).map_err(WalkError::Io)?;
+        w.write_all(chunk?.as_ref()).map_err(WalkError::Io)?;
     }
     Ok(())
 }
@@ -1491,6 +1495,33 @@ mod tests {
         assert_eq!(chunks.next().unwrap().unwrap(), b"first");
         assert!(chunks.next().unwrap().is_err());
         assert!(chunks.next().is_none());
+    }
+
+    #[test]
+    fn content_chunks_preserves_shared_buffers() {
+        use std::sync::Arc;
+        let first = encode_blob(b"first");
+        let second = encode_blob(b"second");
+        let root = encode_file_node(&[first.key, second.key]);
+        let store = MemStore::of(&[&first, &second, &root]);
+        let first_bytes: Arc<[u8]> = store.get()(first.key).unwrap().into();
+        let second_bytes: Arc<[u8]> = store.get()(second.key).unwrap().into();
+        let get = |key| -> Result<Arc<[u8]>, String> {
+            if key == first.key {
+                Ok(first_bytes.clone())
+            } else if key == second.key {
+                Ok(second_bytes.clone())
+            } else {
+                store.get()(key).map(Arc::from)
+            }
+        };
+        let mut chunks = content_chunks(root.key, get);
+        assert!(Arc::ptr_eq(&chunks.next().unwrap().unwrap(), &first_bytes));
+        assert!(Arc::ptr_eq(&chunks.next().unwrap().unwrap(), &second_bytes));
+        assert!(chunks.next().is_none());
+        let mut output = Vec::new();
+        write_content(&mut output, root.key, get).unwrap();
+        assert_eq!(output, b"firstsecond");
     }
 
     #[test]
