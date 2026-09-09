@@ -336,6 +336,43 @@ fn parse_footer_integrity(mm: &[u8], integrity: FooterIntegrity) -> Result<Foote
     })
 }
 
+/// A footer-only mapping with independent sparse read-ahead advice.
+struct SparseIndex {
+    mm: Mmap,
+    fanout: [u32; 256],
+    entries: std::ops::Range<usize>,
+    filter: BinaryFuse16Layout,
+    filter_range: std::ops::Range<usize>,
+}
+
+impl SparseIndex {
+    fn open(file: &File, fv: &FooterView) -> Result<Self, Error> {
+        let base = fv.index_off as usize;
+        // SAFETY: this uses the same immutable sealed file as the full mapping.
+        // MmapOptions handles offsets that are not page aligned.
+        let mm = unsafe { memmap2::MmapOptions::new().offset(fv.index_off).map(file) }?;
+        #[cfg(target_os = "linux")]
+        mm.advise(memmap2::Advice::Random)?;
+        Ok(Self {
+            mm,
+            fanout: fv.fanout,
+            entries: fv.entries_off - base..fv.entries_off - base + fv.entries_len,
+            filter: fv.filter,
+            filter_range: fv.filter_range.start - base..fv.filter_range.end - base,
+        })
+    }
+
+    fn lookup(&self, k: Key) -> Option<(u64, u32)> {
+        if !self
+            .filter
+            .contains(&self.mm[self.filter_range.clone()], filter_key(k))
+        {
+            return None;
+        }
+        search_index(&self.fanout, &self.mm[self.entries.clone()], k)
+    }
+}
+
 /// An immutable, fully mmap'd sealed segment (Go: `sealedSegment`).
 pub(crate) struct SealedSegment {
     pub id: u64,
@@ -344,6 +381,7 @@ pub(crate) struct SealedSegment {
     pub device: u64,
     pub inode: u64,
     pub fv: FooterView,
+    sparse_index: SparseIndex,
 }
 
 impl std::fmt::Debug for SealedSegment {
@@ -407,6 +445,7 @@ impl SealedSegment {
         })?;
         #[cfg(target_os = "linux")]
         mm.advise(memmap2::Advice::Normal)?;
+        let sparse_index = SparseIndex::open(&f, &fv)?;
         Ok(SealedSegment {
             id,
             path: path.to_path_buf(),
@@ -414,6 +453,7 @@ impl SealedSegment {
             inode: st.ino(),
             mm,
             fv,
+            sparse_index,
         })
     }
 
@@ -456,10 +496,16 @@ impl SealedSegment {
         k: Key,
         pattern: super::ReadPattern,
     ) -> Result<Option<Vec<u8>>, Error> {
-        if !self.fv.filter_contains(&self.mm, filter_key(k)) {
-            return Ok(None);
-        }
-        let Some((off, slen)) = self.fv.lookup(&self.mm, k) else {
+        let location = match pattern {
+            super::ReadPattern::Sparse => self.sparse_index.lookup(k),
+            super::ReadPattern::Normal => {
+                if !self.fv.filter_contains(&self.mm, filter_key(k)) {
+                    return Ok(None);
+                }
+                self.fv.lookup(&self.mm, k)
+            }
+        };
+        let Some((off, slen)) = location else {
             return Ok(None);
         };
         let (start, end) = self.record_span(off, slen)?;
