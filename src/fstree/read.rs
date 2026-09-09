@@ -456,11 +456,12 @@ where
 }
 
 /// Reuses decoded directories while reading related paths from one object source.
-/// Drop the reader after a bounded operation to release its decoded objects.
+/// Retains at most 64 recently used directory objects; drop it after the operation.
 /// The getter must return immutable content for each key, as for `lookup_entry`.
 pub struct DirectoryReader<G> {
     get: G,
     directories: std::collections::HashMap<Key, DecodedDirectory>,
+    recent: std::collections::VecDeque<Key>,
 }
 
 enum DecodedDirectory {
@@ -476,12 +477,22 @@ where
         Self {
             get,
             directories: std::collections::HashMap::new(),
+            recent: std::collections::VecDeque::new(),
         }
     }
 
     pub fn lookup_entry(&mut self, dir: Key, name: &[u8]) -> Result<Entry, WalkError<E>> {
         let mut k = dir;
         loop {
+            if let Some(position) = self.recent.iter().position(|&key| key == k) {
+                self.recent.remove(position);
+            } else if self.directories.len() == 64 {
+                let oldest = self
+                    .recent
+                    .pop_front()
+                    .expect("cached directory has recency");
+                self.directories.remove(&oldest);
+            }
             let directory = match self.directories.entry(k) {
                 std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
                 std::collections::hash_map::Entry::Vacant(entry) => {
@@ -501,6 +512,7 @@ where
                     entry.insert(decoded)
                 }
             };
+            self.recent.push_back(k);
             match directory {
                 DecodedDirectory::Leaf(entries) => {
                     let i = entries.partition_point(|e| e.name.as_slice() < name);
@@ -1440,6 +1452,24 @@ mod tests {
             }
         }
         assert!(reads.borrow().values().all(|&count| count == 1));
+    }
+
+    #[test]
+    fn directory_reader_eviction_preserves_lookup_results() {
+        let mut store = MemStore::default();
+        let root = big_dir(&mut store, 1000);
+        let mut reader = DirectoryReader::new(store.get());
+        for _ in 0..2 {
+            for i in 0..1000 {
+                let name = format!("e{i:05}");
+                assert_eq!(
+                    reader.lookup_entry(root, name.as_bytes()).unwrap(),
+                    lookup_entry(root, name.as_bytes(), store.get()).unwrap()
+                );
+                assert!(reader.directories.len() <= 64);
+                assert_eq!(reader.directories.len(), reader.recent.len());
+            }
+        }
     }
 
     #[test]
