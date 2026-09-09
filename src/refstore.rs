@@ -121,11 +121,20 @@ impl Store {
         } else {
             Durability::Eventual
         };
-        // Create the table up front so every later transaction — including
-        // read-only ones — finds it.
-        let tx = db.begin_write().map_err(open_err)?;
-        tx.open_table(TABLE).map_err(open_err)?;
-        tx.commit().map_err(open_err)?;
+        // Existing tables need no write transaction or durability barrier.
+        let missing = {
+            let tx = db.begin_read().map_err(open_err)?;
+            match tx.open_table(TABLE) {
+                Ok(_) => false,
+                Err(redb::TableError::TableDoesNotExist(_)) => true,
+                Err(error) => return Err(open_err(error)),
+            }
+        };
+        if missing {
+            let tx = db.begin_write().map_err(open_err)?;
+            tx.open_table(TABLE).map_err(open_err)?;
+            tx.commit().map_err(open_err)?;
+        }
         Ok(Store { db, durability })
     }
 
@@ -228,6 +237,30 @@ mod tests {
         assert!(matches!(s.durability, Durability::Immediate));
         let s = Store::open(dir.path().join("nosync"), false).unwrap();
         assert!(matches!(s.durability, Durability::Eventual));
+    }
+
+    #[test]
+    fn open_initializes_an_existing_database_without_the_refs_table() {
+        let dir = tempdir();
+        drop(Database::create(dir.path().join(DB_FILE)).unwrap());
+        let store = Store::open(dir.path(), true).unwrap();
+        assert!(store.all().unwrap().is_empty());
+        store.put("main", b"record").unwrap();
+        drop(store);
+        let reopened = Store::open(dir.path(), true).unwrap();
+        assert_eq!(reopened.get("main").unwrap(), b"record");
+    }
+
+    #[test]
+    fn open_rejects_an_incompatible_existing_refs_table() {
+        let dir = tempdir();
+        let db = Database::create(dir.path().join(DB_FILE)).unwrap();
+        let tx = db.begin_write().unwrap();
+        tx.open_table(TableDefinition::<u64, u64>::new("refs"))
+            .unwrap();
+        tx.commit().unwrap();
+        drop(db);
+        assert!(matches!(Store::open(dir.path(), true), Err(Error::Open(_))));
     }
 
     /// Open creates the directory (and parents) as needed, like Pebble.
