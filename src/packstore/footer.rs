@@ -253,6 +253,15 @@ impl FooterView {
 /// returns its footer view. `mm` may be a read-only mmap; nothing is mutated
 /// (Go: `parseFooter`).
 pub(crate) fn parse_footer(mm: &[u8]) -> Result<FooterView, Error> {
+    parse_footer_integrity(mm, FooterIntegrity::Checksum)
+}
+
+enum FooterIntegrity {
+    Checksum,
+    VerifiedImmutable,
+}
+
+fn parse_footer_integrity(mm: &[u8], integrity: FooterIntegrity) -> Result<FooterView, Error> {
     if mm.len() < MIN_SEALED_LEN {
         return Err(corrupt(format!("file too short: {} bytes", mm.len())));
     }
@@ -299,7 +308,9 @@ pub(crate) fn parse_footer(mm: &[u8]) -> Result<FooterView, Error> {
     {
         return Err(corrupt("trailer offsets inconsistent"));
     }
-    if crc_fast::crc32_iscsi(&mm[body_len as usize..mm.len() - 16]) != be_u32(tr, 48) {
+    if matches!(integrity, FooterIntegrity::Checksum)
+        && crc_fast::crc32_iscsi(&mm[body_len as usize..mm.len() - 16]) != be_u32(tr, 48)
+    {
         return Err(corrupt("footer CRC mismatch"));
     }
     if mm[body_len as usize] != TAG_SEAL {
@@ -348,6 +359,14 @@ impl SealedSegment {
     /// Maps a sealed segment and validates its footer. The fd is closed after
     /// mapping; the mapping keeps the file content alive (Go: `openSealed`).
     pub(crate) fn open(path: &Path, id: u64) -> Result<SealedSegment, Error> {
+        Self::open_with_index(path, id, None)
+    }
+
+    pub(crate) fn open_with_index(
+        path: &Path,
+        id: u64,
+        proof: Option<&super::ValidatedIndexDigest>,
+    ) -> Result<SealedSegment, Error> {
         let f = File::open(path)?;
         let st = f.metadata()?;
         if st.len() < MIN_SEALED_LEN as u64 {
@@ -372,7 +391,14 @@ impl SealedSegment {
                 TRAILER_SIZE,
             )?;
         }
-        let fv = parse_footer(&mm).map_err(|e| Error::Context {
+        let integrity = match proof {
+            Some(proof) => {
+                proof.verify(&f)?;
+                FooterIntegrity::VerifiedImmutable
+            }
+            None => FooterIntegrity::Checksum,
+        };
+        let fv = parse_footer_integrity(&mm, integrity).map_err(|e| Error::Context {
             msg: path.display().to_string(),
             source: Box::new(e),
         })?;

@@ -38,6 +38,29 @@
 
       packages = eachSystem (
         system: pkgs: {
+          index-proof-check = pkgs.rustPlatform.buildRustPackage {
+            pname = "amber-core-index-proof-check";
+            version = "0.1.0";
+            src = self;
+            cargoLock.lockFile = ./Cargo.lock;
+            cargoBuildFlags = [
+              "--example"
+              "index-proof-check"
+            ];
+            doCheck = false;
+            nativeBuildInputs = [ pkgs.makeWrapper ];
+            installPhase = ''
+              runHook preInstall
+              install -Dm755 target/${pkgs.stdenv.hostPlatform.rust.rustcTarget}/release/examples/index-proof-check $out/bin/index-proof-check
+              wrapProgram $out/bin/index-proof-check --prefix PATH : ${
+                pkgs.lib.makeBinPath [
+                  pkgs.e2fsprogs
+                  pkgs.util-linux
+                ]
+              }
+              runHook postInstall
+            '';
+          };
           store-check = pkgs.rustPlatform.buildRustPackage {
             pname = "amber-core-store-check";
             version = "0.1.0";

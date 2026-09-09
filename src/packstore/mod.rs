@@ -15,8 +15,10 @@ mod barrier;
 mod compact;
 mod footer;
 mod gc;
+mod index_proof;
 mod markset;
 mod missing;
+pub use index_proof::ValidatedIndexDigest;
 mod parallel;
 mod records;
 mod recover;
@@ -29,7 +31,7 @@ pub use gc::SegmentInfo;
 pub use markset::{MarkSet, SealedMembership, SegmentBitmap};
 pub use parallel::{DEFAULT_BATCH_SIZE, WriteOpts, WriteStats};
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::os::fd::AsRawFd;
@@ -357,6 +359,19 @@ impl Store {
 
     /// [`Store::open`] with explicit [`Options`].
     pub fn open_with(dir: impl AsRef<Path>, cfg: Options) -> Result<Store, Error> {
+        Self::open_with_validated_indexes(dir, cfg, &BTreeMap::new())
+    }
+
+    /// Opens with authenticated proofs for previously validated immutable indexes.
+    /// Unlisted segments retain full footer validation. A listed segment must
+    /// match its proof through fs-verity on the exact file used for mapping.
+    /// Missing immutability or a digest mismatch fails opening the store.
+    /// Active recovery, payload checks, and collection rules remain unchanged.
+    pub fn open_with_validated_indexes(
+        dir: impl AsRef<Path>,
+        cfg: Options,
+        indexes: &BTreeMap<u64, ValidatedIndexDigest>,
+    ) -> Result<Store, Error> {
         let dir = dir.as_ref().to_path_buf();
         fs::create_dir_all(&dir)
             .map_err(|e| Error::Other(format!("packstore: creating {}: {e}", dir.display())))?;
@@ -370,13 +385,18 @@ impl Store {
                 dir.display()
             )));
         }
-        Store::load(dir, dir_f, cfg)
+        Store::load(dir, dir_f, cfg, indexes)
     }
 
     /// Scans the directory: sealed segments are opened and validated, the
     /// active segment (at most one) is recovered (Go: `load` +
     /// `recoverActive`).
-    fn load(dir: PathBuf, dir_f: File, cfg: Options) -> Result<Store, Error> {
+    fn load(
+        dir: PathBuf,
+        dir_f: File,
+        cfg: Options,
+        indexes: &BTreeMap<u64, ValidatedIndexDigest>,
+    ) -> Result<Store, Error> {
         let mut names: Vec<Vec<u8>> = Vec::new();
         for entry in fs::read_dir(&dir)? {
             names.push(entry?.file_name().as_encoded_bytes().to_vec());
@@ -392,7 +412,11 @@ impl Store {
             } else if name.ends_with(SEALED_SUFFIX.as_bytes()) {
                 let id = parse_segment_id(name, SEALED_SUFFIX)?;
                 let path = dir.join(String::from_utf8_lossy(name).as_ref());
-                sealed.push(Arc::new(SealedSegment::open(&path, id)?));
+                sealed.push(Arc::new(SealedSegment::open_with_index(
+                    &path,
+                    id,
+                    indexes.get(&id),
+                )?));
                 if id >= next_id {
                     next_id = id + 1;
                 }
