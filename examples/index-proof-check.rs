@@ -65,6 +65,7 @@ fn exercise(base: &Path) {
     let store = Store::open(&dir).unwrap();
     for bytes in &data {
         store.put(key(bytes), bytes).unwrap();
+        store.seal_snapshot().unwrap();
     }
     let snapshot = store.seal_snapshot().unwrap();
     assert!(
@@ -75,7 +76,7 @@ fn exercise(base: &Path) {
         enable(file);
     }
     let proofs = snapshot.validated_index_digests().unwrap();
-    assert_eq!(proofs.len(), 1);
+    assert_eq!(proofs.len(), 32);
     let (&id, proof) = proofs.first_key_value().unwrap();
     let restored = proofs
         .iter()

@@ -403,7 +403,7 @@ impl Store {
         }
         names.sort(); // Go's os.ReadDir returns names sorted
 
-        let mut sealed: Vec<Arc<SealedSegment>> = Vec::new();
+        let mut sealed_paths = Vec::new();
         let mut active_names: Vec<Vec<u8>> = Vec::new();
         let mut next_id = 1u64;
         for name in &names {
@@ -412,17 +412,40 @@ impl Store {
             } else if name.ends_with(SEALED_SUFFIX.as_bytes()) {
                 let id = parse_segment_id(name, SEALED_SUFFIX)?;
                 let path = dir.join(String::from_utf8_lossy(name).as_ref());
-                sealed.push(Arc::new(SealedSegment::open_with_index(
-                    &path,
-                    id,
-                    indexes.get(&id),
-                )?));
+                sealed_paths.push((id, path));
                 if id >= next_id {
                     next_id = id + 1;
                 }
             }
             // Anything else (e.g. .DS_Store) is ignored.
         }
+        let open = |paths: &[(u64, PathBuf)]| -> Result<Vec<Arc<SealedSegment>>, Error> {
+            paths
+                .iter()
+                .map(|(id, path)| {
+                    SealedSegment::open_with_index(path, *id, indexes.get(id)).map(Arc::new)
+                })
+                .collect()
+        };
+        let workers = std::thread::available_parallelism()
+            .map_or(1, usize::from)
+            .min(8);
+        // Small stores cannot amortize thread startup across enough segment opens.
+        let mut sealed = if workers == 1 || sealed_paths.len() < 16 {
+            open(&sealed_paths)?
+        } else {
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = sealed_paths
+                    .chunks(sealed_paths.len().div_ceil(workers))
+                    .map(|paths| scope.spawn(move || open(paths)))
+                    .collect();
+                let mut segments = Vec::with_capacity(sealed_paths.len());
+                for handle in handles {
+                    segments.extend(handle.join().expect("sealed segment opener panicked")?);
+                }
+                Ok::<_, Error>(segments)
+            })?
+        };
         sealed.sort_by_key(|s| s.id);
 
         if active_names.len() > 1 {

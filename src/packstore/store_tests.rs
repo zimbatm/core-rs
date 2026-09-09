@@ -2154,3 +2154,34 @@ fn sparse_reads_match_normal_across_rotation_and_restart() {
     check(&reopened);
     reopened.close().unwrap();
 }
+
+#[test]
+fn many_sealed_segments_reopen_and_release_failed_open() {
+    let dir = TempDir::new().unwrap();
+    let objects: Vec<_> = (0..32)
+        .map(|i| blob_obj(format!("segment {i}").as_bytes()))
+        .collect();
+    let store = Store::open(dir.path()).unwrap();
+    for object in &objects {
+        store.put(object.key, &object.data).unwrap();
+        store.seal_snapshot().unwrap();
+    }
+    store.close().unwrap();
+    assert_eq!(sealed_files(dir.path()).len(), 32);
+    let reopened = Store::open(dir.path()).unwrap();
+    for object in &objects {
+        assert_eq!(reopened.get(object.key).unwrap(), object.data);
+    }
+    reopened.close().unwrap();
+
+    let path = sealed_files(dir.path()).remove(5);
+    let original = fs::read(&path).unwrap();
+    fs::write(&path, b"invalid segment").unwrap();
+    assert!(Store::open(dir.path()).is_err());
+    fs::write(&path, original).unwrap();
+    let restored = Store::open(dir.path()).unwrap();
+    for object in &objects {
+        assert_eq!(restored.get(object.key).unwrap(), object.data);
+    }
+    restored.close().unwrap();
+}
