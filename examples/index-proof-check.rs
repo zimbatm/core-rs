@@ -110,6 +110,34 @@ fn exercise(base: &Path) {
         store.verify(|| false).unwrap();
         store.close().unwrap();
     }
+    // Each complete-index consumer must work before any object read initializes indexes.
+    for operation in 0..4 {
+        let store =
+            Store::open_with_validated_indexes(&dir, Options::default(), &restored).unwrap();
+        match operation {
+            0 => {
+                let mut marks = store.new_mark_set().unwrap();
+                for bytes in &data {
+                    assert_eq!(marks.mark(key(bytes)), (true, true));
+                }
+            }
+            1 => {
+                assert_eq!(store.seal_snapshot().unwrap().files().len(), data.len());
+            }
+            2 => {
+                store.verify(|| false).unwrap();
+            }
+            _ => {
+                let mut keys: Vec<_> = data.iter().rev().map(|bytes| key(bytes)).collect();
+                store.sort_by_location(&mut keys).unwrap();
+                assert_eq!(
+                    keys,
+                    data.iter().map(|bytes| key(bytes)).collect::<Vec<_>>()
+                );
+            }
+        }
+        store.close().unwrap();
+    }
     // A later, unlisted segment must retain ordinary footer validation.
     let store = Store::open_with_validated_indexes(&dir, Options::default(), &proofs).unwrap();
     store.put(key(b"later"), b"later").unwrap();
@@ -137,6 +165,19 @@ fn exercise(base: &Path) {
     fs::copy(segment(&dir, later_id), &original).unwrap();
     enable(&File::open(&original).unwrap());
     assert!(Store::open_with_validated_indexes(&dir, Options::default(), &proofs).is_err());
+    fs::remove_file(&original).unwrap();
+    fs::rename(&retained, &original).unwrap();
+    // Deferred reads must use the verified inode even after its path is replaced.
+    let store = Store::open_with_validated_indexes(&dir, Options::default(), &proofs).unwrap();
+    fs::rename(&original, &retained).unwrap();
+    fs::copy(segment(&dir, later_id), &original).unwrap();
+    assert_eq!(store.get(key(&data[0])).unwrap(), data[0]);
+    assert!(
+        store.seal_snapshot().is_err(),
+        "replacement inode entered snapshot"
+    );
+    store.close().unwrap();
+    drop(store);
     fs::remove_file(&original).unwrap();
     fs::rename(&retained, &original).unwrap();
     // Validation must run after sealing, despite an earlier successful parse.

@@ -36,7 +36,9 @@ impl Store {
     /// Snapshots the store into a fresh, unmarked [`MarkSet`]: every sealed
     /// segment (ascending id, one bitmap each) plus the keys of the active
     /// segment's in-RAM index (Go: `NewMarkSet`).
-    pub fn new_mark_set(&self) -> MarkSet {
+    /// Initializes all captured indexes before exposing infallible marking.
+    /// Returns an error if any deferred index cannot be initialized.
+    pub fn new_mark_set(&self) -> Result<MarkSet, super::Error> {
         let sh = unpoison(self.shared.read());
         let mut m = MarkSet {
             segs: Vec::with_capacity(sh.sealed.len()),
@@ -45,6 +47,7 @@ impl Store {
             marked: 0,
         };
         for g in &sh.sealed {
+            let g = g.load()?;
             m.segs.push(g.clone());
             m.bits
                 .push(vec![0u64; g.fv.key_count.div_ceil(64) as usize]);
@@ -54,7 +57,7 @@ impl Store {
                 m.active.insert(*k, false);
             }
         }
-        m
+        Ok(m)
     }
 }
 

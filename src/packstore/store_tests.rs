@@ -284,12 +284,14 @@ fn sort_by_location_orders_by_disk_layout() {
     // Reverse so the input is not already in disk order.
     keys.reverse();
 
-    s.sort_by_location(&mut keys);
+    s.sort_by_location(&mut keys).unwrap();
 
     let sh = super::unpoison(s.shared.read());
     let mut prev: Option<(u64, u64)> = None;
     for k in &keys {
-        let (seg, off) = Store::locate_in(&sh, *k).expect("locate");
+        let (seg, off) = Store::locate_in(&sh, *k)
+            .expect("valid index")
+            .expect("locate");
         if let Some((pseg, poff)) = prev {
             assert!(
                 seg > pseg || (seg == pseg && off >= poff),
@@ -321,7 +323,7 @@ fn records_in_order_survive_rotation_wipe_and_close() {
     keys.reverse();
     keys.push(keys[0]);
     let mut sorted = keys.clone();
-    store.sort_by_location(&mut sorted);
+    store.sort_by_location(&mut sorted).unwrap();
     let expected: Vec<_> = sorted
         .into_iter()
         .map(|key| (key, store.get_record(key).unwrap()))
@@ -378,7 +380,7 @@ fn sort_by_location_puts_absent_keys_last() {
     s.put(present.key, &present.data).unwrap();
     let absent = blob_obj(b"gone").key;
     let mut keys = vec![absent, present.key];
-    s.sort_by_location(&mut keys);
+    s.sort_by_location(&mut keys).unwrap();
     assert_eq!(
         keys,
         vec![present.key, absent],

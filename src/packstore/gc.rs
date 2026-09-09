@@ -95,6 +95,7 @@ impl Store {
         }
         let mut out = Vec::with_capacity(sh.sealed.len());
         for g in &sh.sealed {
+            let g = g.load()?;
             let sealed = fs::metadata(&g.path)?.modified()?;
             out.push(SegmentInfo {
                 id: g.id,
@@ -118,7 +119,7 @@ impl Store {
         }
         for g in &sh.sealed {
             if g.id == id {
-                return Ok(g.clone());
+                return g.load().cloned();
             }
         }
         Err(Error::UnknownSegment)
@@ -184,7 +185,7 @@ impl Store {
             if g.id == id {
                 continue;
             }
-            if g.has(k) {
+            if g.load()?.has(k) {
                 return Ok(true);
             }
         }

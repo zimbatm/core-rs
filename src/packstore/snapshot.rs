@@ -54,7 +54,7 @@ impl Store {
             if !metadata.is_file()
                 || metadata.dev() != segment.device
                 || metadata.ino() != segment.inode
-                || metadata.len() != segment.mm.len() as u64
+                || metadata.len() != segment.len as u64
             {
                 return Err(corrupt("captured segment inode changed"));
             }
@@ -62,7 +62,11 @@ impl Store {
         }
         Ok(SegmentSnapshot {
             files,
-            segments: sh.sealed.clone(),
+            segments: sh
+                .sealed
+                .iter()
+                .map(|segment| segment.load().cloned())
+                .collect::<Result<_, _>>()?,
         })
     }
 }

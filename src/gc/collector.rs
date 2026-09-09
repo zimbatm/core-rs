@@ -316,7 +316,7 @@ impl Core {
     /// snapshot-reachable objects and runs concurrently with ingests (their
     /// writes join the barrier's grey set) (Go: `markLive`).
     pub(super) fn mark_live(&self, cancel: Cancel<'_>, roots: &[Key]) -> Result<MarkSet, Error> {
-        let mut live = self.objects.new_mark_set();
+        let mut live = self.objects.new_mark_set().map_err(Error::Objects)?;
         for &root in roots {
             self.mark_from(cancel, &mut live, root)?;
         }

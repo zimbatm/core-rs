@@ -43,7 +43,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 use crate::amberpack::{self, REC_HEADER_SIZE, decode_payload, encode_record};
 use crate::key::Key;
 
-use footer::SealedSegment;
+use footer::{SealedSegment, Segment};
 pub use records::{RecordView, Records};
 use recover::{ActiveLoc, scan_active};
 
@@ -274,7 +274,7 @@ struct AppendState {
 
 /// Reader-visible state (Go: fields guarded by `mu`).
 struct Shared {
-    sealed: Vec<Arc<SealedSegment>>,    // ascending id; newest last
+    sealed: Vec<Arc<Segment>>,          // ascending id; newest last
     active: Option<Arc<ActiveSegment>>, // None until the first write of a session
     closed: bool,
     failed: Option<String>, // sticky write-path failure detail
@@ -366,6 +366,8 @@ impl Store {
     /// Unlisted segments retain full footer validation. A listed segment must
     /// match its proof through fs-verity on the exact file used for mapping.
     /// Missing immutability or a digest mismatch fails opening the store.
+    /// Authenticated footer layouts initialize on first use; layout errors
+    /// propagate from that operation. Ordinary segments validate during opening.
     /// Active recovery, payload checks, and collection rules remain unchanged.
     pub fn open_with_validated_indexes(
         dir: impl AsRef<Path>,
@@ -419,11 +421,11 @@ impl Store {
             }
             // Anything else (e.g. .DS_Store) is ignored.
         }
-        let open = |paths: &[(u64, PathBuf)]| -> Result<Vec<Arc<SealedSegment>>, Error> {
+        let open = |paths: &[(u64, PathBuf)]| -> Result<Vec<Arc<Segment>>, Error> {
             paths
                 .iter()
                 .map(|(id, path)| {
-                    SealedSegment::open_with_index(path, *id, indexes.get(id)).map(Arc::new)
+                    Segment::open_with_index(path, *id, indexes.get(id)).map(Arc::new)
                 })
                 .collect()
         };
@@ -477,7 +479,10 @@ impl Store {
                 let sealed_path = dir.join(sealed_name);
                 fs::rename(&path, &sealed_path)?;
                 dir_f.sync_all()?;
-                sealed.push(Arc::new(SealedSegment::open(&sealed_path, id)?));
+                sealed.push(Arc::new(Segment::from_loaded(SealedSegment::open(
+                    &sealed_path,
+                    id,
+                )?)));
                 sealed.sort_by_key(|s| s.id);
             } else {
                 let f = OpenOptions::new().read(true).write(true).open(&path)?;
@@ -713,7 +718,7 @@ impl Store {
         let seg = SealedSegment::open(&sealed_path, aw.seg.id)?;
         {
             let mut sh = unpoison(self.shared.write());
-            sh.sealed.push(Arc::new(seg));
+            sh.sealed.push(Arc::new(Segment::from_loaded(seg)));
             sh.active = None;
         }
         // Drop the writer's handle only after the swap: readers that resolved
@@ -895,6 +900,7 @@ impl Store {
             }
         }
         for (_position, seg) in sh.sealed.iter().rev().enumerate() {
+            let seg = seg.load()?;
             // A corrupt segment fails the read loudly rather than falling
             // back to older copies: masking corruption would hide real damage
             // from scrub.
@@ -938,7 +944,7 @@ impl Store {
             }
         }
         for seg in sh.sealed.iter().rev() {
-            if let Some(rec) = seg.get_record(k)? {
+            if let Some(rec) = seg.load()?.get_record(k)? {
                 return Ok(rec);
             }
         }
@@ -961,7 +967,7 @@ impl Store {
             }
         }
         for seg in sh.sealed.iter().rev() {
-            if let Some(slen) = seg.stored_size(k) {
+            if let Some(slen) = seg.load()?.stored_size(k) {
                 return Ok(Some(u64::from(slen)));
             }
         }
@@ -971,19 +977,19 @@ impl Store {
     /// Returns the segment id and record offset where `k` lives, for ordering
     /// reads by physical layout. Caller holds the shared lock (Go:
     /// `locateLocked`).
-    fn locate_in(sh: &Shared, k: Key) -> Option<(u64, u64)> {
+    fn locate_in(sh: &Shared, k: Key) -> Result<Option<(u64, u64)>, Error> {
         if let Some(a) = &sh.active {
             let loc = unpoison(a.index.read()).get(&k).copied();
             if let Some(loc) = loc {
-                return Some((a.id, loc.off));
+                return Ok(Some((a.id, loc.off)));
             }
         }
         for seg in sh.sealed.iter().rev() {
-            if let Some(off) = seg.locate(k) {
-                return Some((seg.id, off));
+            if let Some(off) = seg.load()?.locate(k) {
+                return Ok(Some((seg.id, off)));
             }
         }
-        None
+        Ok(None)
     }
 
     /// Reorders `keys` in place to follow the store's on-disk layout —
@@ -992,7 +998,8 @@ impl Store {
     /// scattered random access. Absent keys sort last (their reads surface
     /// [`Error::NotFound`] later). It is a no-op on a closed store (Go:
     /// `SortByLocation`).
-    pub fn sort_by_location(&self, keys: &mut [Key]) {
+    /// Index initialization errors leave the input order unchanged.
+    pub fn sort_by_location(&self, keys: &mut [Key]) -> Result<(), Error> {
         struct Located {
             k: Key,
             seg: u64,
@@ -1002,24 +1009,26 @@ impl Store {
         let mut items: Vec<Located> = {
             let sh = unpoison(self.shared.read());
             if sh.closed {
-                return;
+                return Ok(());
             }
             keys.iter()
-                .map(|&k| match Store::locate_in(&sh, k) {
-                    Some((seg, off)) => Located {
-                        k,
-                        seg,
-                        off,
-                        ok: true,
-                    },
-                    None => Located {
-                        k,
-                        seg: 0,
-                        off: 0,
-                        ok: false,
-                    },
+                .map(|&k| {
+                    Ok(match Store::locate_in(&sh, k)? {
+                        Some((seg, off)) => Located {
+                            k,
+                            seg,
+                            off,
+                            ok: true,
+                        },
+                        None => Located {
+                            k,
+                            seg: 0,
+                            off: 0,
+                            ok: false,
+                        },
+                    })
                 })
-                .collect()
+                .collect::<Result<_, Error>>()?
         };
         items.sort_by(|a, b| {
             // Present keys before absent ones, then (segment, offset).
@@ -1028,6 +1037,7 @@ impl Store {
         for (dst, item) in keys.iter_mut().zip(&items) {
             *dst = item.k;
         }
+        Ok(())
     }
 
     /// Reports whether an object is stored under `k` (Go: `Has`).
@@ -1042,7 +1052,12 @@ impl Store {
                 return Ok(true);
             }
         }
-        Ok(sh.sealed.iter().rev().any(|seg| seg.has(k)))
+        for seg in sh.sealed.iter().rev() {
+            if seg.load()?.has(k) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Deletes every object: the active segment and all sealed segments are

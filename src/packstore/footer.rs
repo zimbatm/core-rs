@@ -353,13 +353,17 @@ impl SparseIndex {
         let mm = unsafe { memmap2::MmapOptions::new().offset(fv.index_off).map(file) }?;
         #[cfg(target_os = "linux")]
         mm.advise(memmap2::Advice::Random)?;
-        Ok(Self {
+        Ok(Self::from_mapping(mm, fv, base))
+    }
+
+    fn from_mapping(mm: Mmap, fv: &FooterView, base: usize) -> Self {
+        Self {
             mm,
             fanout: fv.fanout,
             entries: fv.entries_off - base..fv.entries_off - base + fv.entries_len,
             filter: fv.filter,
             filter_range: fv.filter_range.start - base..fv.filter_range.end - base,
-        })
+        }
     }
 
     fn lookup(&self, k: Key) -> Option<(u64, u32)> {
@@ -370,6 +374,110 @@ impl SparseIndex {
             return None;
         }
         search_index(&self.fanout, &self.mm[self.entries.clone()], k)
+    }
+}
+
+/// Keeps proof verification bound to the mapped inode while deferring index reads.
+pub(crate) struct Segment {
+    pub id: u64,
+    pub path: PathBuf,
+    pub device: u64,
+    pub inode: u64,
+    pub len: usize,
+    loaded: std::sync::OnceLock<std::sync::Arc<SealedSegment>>,
+    pending: std::sync::Mutex<Option<PendingSegment>>,
+}
+
+struct PendingSegment {
+    mm: Mmap,
+    sparse: Mmap,
+}
+
+impl Segment {
+    pub(crate) fn from_loaded(segment: SealedSegment) -> Self {
+        Self {
+            id: segment.id,
+            path: segment.path.clone(),
+            device: segment.device,
+            inode: segment.inode,
+            len: segment.mm.len(),
+            loaded: std::sync::OnceLock::from(std::sync::Arc::new(segment)),
+            pending: std::sync::Mutex::new(None),
+        }
+    }
+
+    pub(crate) fn open_with_index(
+        path: &Path,
+        id: u64,
+        proof: Option<&super::ValidatedIndexDigest>,
+    ) -> Result<Self, Error> {
+        let Some(proof) = proof else {
+            return SealedSegment::open(path, id).map(Self::from_loaded);
+        };
+        let file = File::open(path)?;
+        let metadata = file.metadata()?;
+        if metadata.len() < MIN_SEALED_LEN as u64 {
+            return Err(corrupt(format!(
+                "{}: file too short: {} bytes",
+                path.display(),
+                metadata.len()
+            )));
+        }
+        proof.verify(&file)?;
+        // SAFETY: both read-only mappings use the exact fs-verity inode just verified.
+        let mm = unsafe { Mmap::map(&file) }?;
+        let sparse = unsafe { Mmap::map(&file) }?;
+        #[cfg(target_os = "linux")]
+        sparse.advise(memmap2::Advice::Random)?;
+        Ok(Self {
+            id,
+            path: path.to_path_buf(),
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            len: mm.len(),
+            loaded: std::sync::OnceLock::new(),
+            pending: std::sync::Mutex::new(Some(PendingSegment { mm, sparse })),
+        })
+    }
+
+    pub(crate) fn load(&self) -> Result<&std::sync::Arc<SealedSegment>, Error> {
+        if let Some(segment) = self.loaded.get() {
+            return Ok(segment);
+        }
+        let mut pending = super::unpoison(self.pending.lock());
+        if self.loaded.get().is_none() {
+            let mapped = pending
+                .as_ref()
+                .expect("uninitialized segment retains mappings");
+            #[cfg(target_os = "linux")]
+            mapped.mm.advise(memmap2::Advice::Random)?;
+            let parsed = parse_footer_integrity(&mapped.mm, FooterIntegrity::VerifiedImmutable)
+                .map_err(|source| Error::Context {
+                    msg: self.path.display().to_string(),
+                    source: Box::new(source),
+                });
+            #[cfg(target_os = "linux")]
+            mapped.mm.advise(memmap2::Advice::Normal)?;
+            let fv = parsed?;
+            let mapped = pending.take().expect("validated mappings remain available");
+            let sparse_index = SparseIndex::from_mapping(mapped.sparse, &fv, 0);
+            let segment = SealedSegment {
+                id: self.id,
+                path: self.path.clone(),
+                device: self.device,
+                inode: self.inode,
+                mm: mapped.mm,
+                fv,
+                sparse_index,
+            };
+            assert!(self.loaded.set(std::sync::Arc::new(segment)).is_ok());
+            #[cfg(feature = "read-trace")]
+            eprintln!("amber.index_initialized segment={}", self.id);
+        }
+        Ok(self
+            .loaded
+            .get()
+            .expect("segment initialized under its lock"))
     }
 }
 
@@ -397,14 +505,6 @@ impl SealedSegment {
     /// Maps a sealed segment and validates its footer. The fd is closed after
     /// mapping; the mapping keeps the file content alive (Go: `openSealed`).
     pub(crate) fn open(path: &Path, id: u64) -> Result<SealedSegment, Error> {
-        Self::open_with_index(path, id, None)
-    }
-
-    pub(crate) fn open_with_index(
-        path: &Path,
-        id: u64,
-        proof: Option<&super::ValidatedIndexDigest>,
-    ) -> Result<SealedSegment, Error> {
         let f = File::open(path)?;
         let st = f.metadata()?;
         if st.len() < MIN_SEALED_LEN as u64 {
@@ -429,20 +529,11 @@ impl SealedSegment {
                 TRAILER_SIZE,
             )?;
         }
-        let integrity = match proof {
-            Some(proof) => {
-                proof.verify(&f)?;
-                // Authenticated opening touches only footer headers and fanout pages.
-                #[cfg(target_os = "linux")]
-                mm.advise(memmap2::Advice::Random)?;
-                FooterIntegrity::VerifiedImmutable
-            }
-            None => FooterIntegrity::Checksum,
-        };
-        let fv = parse_footer_integrity(&mm, integrity).map_err(|e| Error::Context {
-            msg: path.display().to_string(),
-            source: Box::new(e),
-        })?;
+        let fv =
+            parse_footer_integrity(&mm, FooterIntegrity::Checksum).map_err(|e| Error::Context {
+                msg: path.display().to_string(),
+                source: Box::new(e),
+            })?;
         #[cfg(target_os = "linux")]
         mm.advise(memmap2::Advice::Normal)?;
         let sparse_index = SparseIndex::open(&f, &fv)?;
@@ -582,5 +673,146 @@ impl SealedSegment {
             return None;
         }
         self.fv.lookup(&self.mm, k).map(|(off, _)| off)
+    }
+}
+
+#[cfg(test)]
+mod lazy_tests {
+    use super::*;
+    use crate::packstore::{ReadPattern, Store, testutil::blob_obj};
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    // Anonymous read-only mappings isolate deferred parsing from fs-verity setup.
+    // The integration probe exercises proof verification on real immutable files.
+    fn pending(segment: &SealedSegment, corrupt_header: bool) -> Segment {
+        fn mapping(bytes: &[u8], corrupt_header: bool) -> Mmap {
+            let mut mm = memmap2::MmapMut::map_anon(bytes.len()).unwrap();
+            mm.copy_from_slice(bytes);
+            if corrupt_header {
+                mm[0] ^= 1;
+            }
+            mm.make_read_only().unwrap()
+        }
+        Segment {
+            id: segment.id,
+            path: segment.path.clone(),
+            device: segment.device,
+            inode: segment.inode,
+            len: segment.mm.len(),
+            loaded: OnceLock::new(),
+            pending: Mutex::new(Some(PendingSegment {
+                mm: mapping(&segment.mm, corrupt_header),
+                sparse: mapping(&segment.mm, corrupt_header),
+            })),
+        }
+    }
+
+    fn defer(store: &Store, corrupt_header: bool) -> Vec<Arc<Segment>> {
+        let mut shared = super::super::unpoison(store.shared.write());
+        shared.sealed = shared
+            .sealed
+            .iter()
+            .map(|segment| Arc::new(pending(segment.load().unwrap(), corrupt_header)))
+            .collect();
+        shared.sealed.clone()
+    }
+
+    #[test]
+    fn concurrent_reads_initialize_only_required_segment() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let first = blob_obj(b"older");
+        let last = blob_obj(b"newer");
+        for object in [&first, &last] {
+            store.put(object.key, &object.data).unwrap();
+            store.seal_snapshot().unwrap();
+        }
+        let handles = defer(&store, false);
+        assert!(handles.iter().all(|segment| segment.loaded.get().is_none()));
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    assert_eq!(
+                        store
+                            .get_with_pattern(last.key, ReadPattern::Sparse)
+                            .unwrap(),
+                        last.data
+                    );
+                    Arc::as_ptr(handles[1].load().unwrap()) as usize
+                });
+            }
+        });
+        let records = store
+            .records_in_order(vec![last.key])
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].0, last.key);
+        assert!(handles[0].loaded.get().is_none());
+        assert!(Arc::ptr_eq(
+            handles[1].load().unwrap(),
+            handles[1].loaded.get().unwrap()
+        ));
+        let mut marks = store.new_mark_set().unwrap();
+        assert!(handles.iter().all(|segment| segment.loaded.get().is_some()));
+        assert_eq!(marks.mark(first.key), (true, true));
+        assert_eq!(marks.mark(last.key), (true, true));
+        store.verify(|| false).unwrap();
+        store.close().unwrap();
+        assert_eq!(
+            handles[0].load().unwrap().get(first.key).unwrap().unwrap(),
+            first.data
+        );
+    }
+
+    #[test]
+    fn deferred_corruption_is_not_absence_or_a_partial_mark_set() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let object = blob_obj(b"corrupt deferred footer");
+        store.put(object.key, &object.data).unwrap();
+        store.seal_snapshot().unwrap();
+        let handles = defer(&store, true);
+        assert!(store.get(object.key).unwrap_err().is_corrupt());
+        assert!(
+            store
+                .get_with_pattern(object.key, ReadPattern::Sparse)
+                .unwrap_err()
+                .is_corrupt()
+        );
+        assert!(store.get_record(object.key).unwrap_err().is_corrupt());
+        assert!(
+            matches!(store.records_in_order(vec![object.key]), Err(error) if error.is_corrupt())
+        );
+        assert!(store.has(object.key).unwrap_err().is_corrupt());
+        assert!(store.stored_size(object.key).unwrap_err().is_corrupt());
+        let mut keys = vec![object.key];
+        assert!(store.sort_by_location(&mut keys).unwrap_err().is_corrupt());
+        assert_eq!(keys, vec![object.key]);
+        assert!(matches!(store.new_mark_set(), Err(error) if error.is_corrupt()));
+        assert!(store.seal_snapshot().unwrap_err().is_corrupt());
+        assert!(store.segments().unwrap_err().is_corrupt());
+        assert!(store.verify(|| false).unwrap_err().is_corrupt());
+        assert!(handles[0].loaded.get().is_none());
+        store.close().unwrap();
+    }
+
+    #[test]
+    fn snapshot_initializes_and_retains_deferred_indexes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let object = blob_obj(b"snapshot lifetime");
+        store.put(object.key, &object.data).unwrap();
+        store.seal_snapshot().unwrap();
+        let handles = defer(&store, false);
+        let snapshot = store.seal_snapshot().unwrap();
+        assert!(handles[0].loaded.get().is_some());
+        store.wipe().unwrap();
+        store.close().unwrap();
+        assert_eq!(
+            snapshot.segments[0].get(object.key).unwrap().unwrap(),
+            object.data
+        );
     }
 }

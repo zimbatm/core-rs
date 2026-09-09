@@ -67,7 +67,7 @@ fn live_set(objs: &[Object], idx: &[usize]) -> impl Fn(Key) -> bool + Sync {
 #[test]
 fn mark_set_marks_and_counts() {
     let (_dir, s, objs) = compact_store();
-    let mut m = s.new_mark_set();
+    let mut m = s.new_mark_set().unwrap();
     for (i, o) in objs.iter().enumerate() {
         assert!(!m.contains(o.key), "object {i} marked before mark");
         let (newly, present) = m.mark(o.key);
@@ -95,7 +95,7 @@ fn mark_set_marks_and_counts() {
 #[test]
 fn mark_set_drives_compact() {
     let (_dir, s, objs) = compact_store();
-    let mut m = s.new_mark_set();
+    let mut m = s.new_mark_set().unwrap();
     for i in [0, 2, 4] {
         m.mark(objs[i].key);
     }
@@ -840,9 +840,15 @@ fn record_view_survives_collection_without_expanding_scope() {
 #[test]
 fn sealed_membership_roundtrip_preserves_exact_subset() {
     let (dir, store, objects) = compact_store();
-    assert!(store.new_mark_set().into_sealed_membership().is_err());
+    assert!(
+        store
+            .new_mark_set()
+            .unwrap()
+            .into_sealed_membership()
+            .is_err()
+    );
     let snapshot = store.seal_snapshot().unwrap();
-    let mut marks = store.new_mark_set();
+    let mut marks = store.new_mark_set().unwrap();
     for index in [0, 2, 4] {
         assert_eq!(marks.mark(objects[index].key), (true, true));
     }
@@ -885,7 +891,7 @@ fn sealed_membership_rejects_invalid_layouts() {
         store.put(object.key, &object.data).unwrap();
     }
     let snapshot = store.seal_snapshot().unwrap();
-    let mut marks = store.new_mark_set();
+    let mut marks = store.new_mark_set().unwrap();
     for object in objects.iter().step_by(3) {
         marks.mark(object.key);
     }

@@ -172,7 +172,7 @@ impl Store {
         }
         let mut report = Vec::new();
         for g in &sh.sealed {
-            report.push(segment_liveness(g, &live));
+            report.push(segment_liveness(g.load()?, &live));
         }
         if let Some(a) = &sh.active {
             let mut info = SegmentLiveness {
@@ -260,7 +260,11 @@ impl Store {
         min_dead_ratio: f64,
         stats: &mut CompactStats,
     ) -> Result<Vec<Arc<SealedSegment>>, Error> {
-        let segs: Vec<Arc<SealedSegment>> = unpoison(self.shared.read()).sealed.clone();
+        let segs: Vec<Arc<SealedSegment>> = unpoison(self.shared.read())
+            .sealed
+            .iter()
+            .map(|segment| segment.load().cloned())
+            .collect::<Result<_, _>>()?;
         stats.segments_scanned = segs.len();
 
         let mut victims = Vec::new();
@@ -296,16 +300,19 @@ impl Store {
         let victim_ids: HashSet<u64> = victims.iter().map(|g| g.id).collect();
         // Victims are still in `shared.sealed` during the copy — reads keep
         // working — so survivor probes must skip them by id.
-        let survivor_has = |k: Key| -> bool {
+        let survivor_has = |k: Key| -> Result<bool, Error> {
             let sh = unpoison(self.shared.read());
             if let Some(a) = &sh.active
                 && unpoison(a.index.read()).contains_key(&k)
             {
-                return true;
+                return Ok(true);
             }
-            sh.sealed
-                .iter()
-                .any(|g| !victim_ids.contains(&g.id) && g.has(k))
+            for g in &sh.sealed {
+                if !victim_ids.contains(&g.id) && g.load()?.has(k) {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
         };
 
         let workers = thread::available_parallelism().map_or(1, |n| n.get());
@@ -332,8 +339,16 @@ impl Store {
                         if pipe.canceled() {
                             return;
                         }
-                        if !live(e.k) || survivor_has(e.k) {
+                        if !live(e.k) {
                             continue;
+                        }
+                        match survivor_has(e.k) {
+                            Ok(true) => continue,
+                            Ok(false) => {}
+                            Err(error) => {
+                                pipe.fail(error);
+                                return;
+                            }
                         }
                         // Overflow-safe, subtraction form: e.off came from
                         // the on-disk index and may be crafted.

@@ -2,7 +2,17 @@
 
 Store::open_with_validated_indexes accepts authenticated validation evidence for sealed segments.
 Each listed segment must match its fs-verity SHA-256 digest on the exact file descriptor used for mapping.
-Core then checks footer layout, bounds, fanout, and filter geometry without repeating the complete footer CRC.
+Core defers footer layout, bounds, fanout, and filter geometry checks until each segment is used.
+These checks do not repeat the complete footer CRC.
+Deferred layout errors propagate from reads, snapshots, verification, and collection.
+Mark-set construction and location sorting now return Result to preserve this error propagation.
+Marking remains infallible after successful mark-set construction.
+
+Each authenticated segment binds two read-only mappings to the verified inode during opening.
+The mappings share file pages but increase virtual address space.
+One mapping retains normal scan advice; the other uses random advice for sparse index lookups.
+No additional file descriptors remain open.
+Only index initialization requires the segment mutex; initialized reads use OnceLock.
 The kernel verifies immutable file pages as they are read.
 
 Unlisted segments retain full footer validation.
@@ -32,7 +42,8 @@ A stale map cannot make missing segments available.
 
 Core does not enable fs-verity automatically.
 Applications must account for checkpoint creation costs and filesystem support.
-This API has not yet been connected to Forge checkpoint authentication or measured on nixpkgs.
+Forge authenticates these proofs through signed checkpoints.
+The lazy initialization change requires new complete-workflow measurements before making performance claims.
 
 ## Validation
 
@@ -56,3 +67,28 @@ Artifacts remain under /home/zimbatm/forge-dev/index-proof-check-01 on bld1.
 Build with nix build .#index-proof-check.
 Run index-proof-check with a new absolute output directory inside a private mount namespace.
 The probe requires mount privileges and preserves its image after unmounting.
+
+## Lazy initialization validation
+
+All 443 core library tests passed on bld1 with all features enabled.
+The new tests cover concurrent first reads, untouched older indexes, deferred corruption, and retained snapshots.
+Ordered record readers retain only required segments.
+Existing recovery, collection, verification, and record tests also passed.
+
+Core test derivation: /nix/store/bngsdprp90j5zi51hbwvilgz412832id-amber-core-store-check-0.1.0.drv.
+Build unit: forge-dev-4b9b8357-f520-4b61-bc78-927df4e6de6a.service.
+Invocation: 3b47c071a2604df992c64939b7b41395.
+Terminal state: MainPID 0, Result success, ExecMainStatus 0.
+
+The expanded filesystem probe initializes mark sets, snapshots, verification, and location sorting before any object read.
+It also replaces a mapped segment path before its first read.
+Reads retain the verified original inode, and snapshot capture rejects the replacement.
+
+Probe derivation: /nix/store/yggx41cz53fcgq81k6xndnb4l6chrln4-amber-core-index-proof-check-0.1.0.drv.
+Probe unit: forge-lazy-index-proof-01.service.
+Invocation: acf98bef5d54473e937d0423009c5448.
+Terminal state: MainPID 0, Result success, ExecMainStatus 0.
+All assertions passed, and the private image unmounted.
+Artifacts remain under /home/zimbatm/forge-dev/lazy-index-proof-01 on bld1.
+
+Forge integration and complete nixpkgs performance measurements remain pending.

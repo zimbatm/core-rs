@@ -162,7 +162,7 @@ impl Store {
                     });
                 }
                 for (index, segment) in shared.sealed.iter().enumerate().rev() {
-                    if let Some((offset, stored_length)) = segment.locate_record(key) {
+                    if let Some((offset, stored_length)) = segment.load()?.locate_record(key) {
                         return Ok(Location {
                             key,
                             segment: index,
@@ -175,17 +175,25 @@ impl Store {
             };
             locations.push(locate()?);
         }
-        let mut segments: Vec<_> = shared
-            .sealed
-            .iter()
-            .map(|s| Segment::Sealed(Arc::clone(s)))
-            .collect();
-        if let Some(segment) = &shared.active {
-            segments.push(Segment::Active(Arc::clone(segment)));
+        locations.sort_unstable_by_key(|location| (location.segment, location.offset));
+        let mut segments = Vec::new();
+        let mut previous = None;
+        for location in &mut locations {
+            if previous != Some(location.segment) {
+                let segment = if location.segment == shared.sealed.len() {
+                    Segment::Active(Arc::clone(
+                        shared.active.as_ref().expect("located active record"),
+                    ))
+                } else {
+                    Segment::Sealed(Arc::clone(shared.sealed[location.segment].load()?))
+                };
+                segments.push(segment);
+                previous = Some(location.segment);
+            }
+            location.segment = segments.len() - 1;
         }
         drop(active);
         drop(shared);
-        locations.sort_unstable_by_key(|location| (location.segment, location.offset));
         Ok(Records {
             segments,
             locations: locations.into_iter(),

@@ -26,7 +26,10 @@ impl Store {
             if sh.closed {
                 return Err(Error::Closed);
             }
-            sh.sealed.clone()
+            sh.sealed
+                .iter()
+                .map(|segment| segment.load().cloned())
+                .collect::<Result<_, _>>()?
         };
         for seg in segs {
             seg.verify(&cancel)?;
