@@ -235,7 +235,7 @@ fn ultra_cdc_cutpoint(opts: &Resolved, data: &[u8]) -> usize {
 /// reader error discards any buffered bytes (as upstream does); a callback
 /// error stops the split immediately.
 pub fn split_bytes<R, E, F>(
-    mut reader: R,
+    reader: R,
     opts: Option<&ByteOpts>,
     mut f: F,
 ) -> Result<(), SplitError<E>>
@@ -243,36 +243,77 @@ where
     R: Read,
     F: FnMut(Vec<u8>) -> Result<(), E>,
 {
+    for chunk in byte_chunks(reader, opts)? {
+        f(chunk.map_err(SplitError::Io)?).map_err(SplitError::Callback)?;
+    }
+    Ok(())
+}
+
+/// Owned UltraCDC chunks with bounded input lookahead.
+/// Stopping iteration can leave the reader ahead of the last yielded boundary.
+/// A read error discards buffered data and permanently ends iteration.
+pub struct ByteChunks<R> {
+    reader: R,
+    resolved: Resolved,
+    buffer: Vec<u8>,
+    eof: bool,
+}
+
+/// Validates options before allocating or reading input.
+pub fn byte_chunks<R: Read>(
+    reader: R,
+    opts: Option<&ByteOpts>,
+) -> Result<ByteChunks<R>, OptionsError> {
     let resolved = Resolved::new(opts);
     resolved.validate()?;
-    let max_size = resolved.max_size;
+    Ok(ByteChunks {
+        reader,
+        resolved,
+        buffer: Vec::with_capacity(resolved.max_size),
+        eof: false,
+    })
+}
 
-    let mut buf: Vec<u8> = Vec::with_capacity(max_size);
-    let mut eof = false;
-    loop {
-        // Refill to max_size bytes, or to EOF (upstream: bufio Peek(MaxSize)).
-        if !eof && buf.len() < max_size {
-            let want = max_size - buf.len();
-            let got = reader
-                .by_ref()
-                .take(want as u64)
-                .read_to_end(&mut buf)
-                .map_err(SplitError::Io)?;
-            if got < want {
-                eof = true;
-            }
-        }
-        if buf.is_empty() {
-            // Empty input, or the previous chunk consumed the final bytes.
-            return Ok(());
-        }
-        let cutpoint = ultra_cdc_cutpoint(&resolved, &buf);
-        // cutpoint >= 1 whenever the buffer is non-empty, so like Go's
-        // SplitBytes we never hand an empty chunk to the callback.
-        f(buf[..cutpoint].to_vec()).map_err(SplitError::Callback)?;
-        buf.drain(..cutpoint);
+impl<R> ByteChunks<R> {
+    /// Maximum input window used to decide one chunk boundary.
+    /// Reusing a stored chunk requires preserving this window, not just its bytes.
+    pub fn max_size(&self) -> usize {
+        self.resolved.max_size
     }
 }
+
+impl<R: Read> Iterator for ByteChunks<R> {
+    type Item = std::io::Result<Vec<u8>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let max_size = self.resolved.max_size;
+        if !self.eof && self.buffer.len() < max_size {
+            let want = max_size - self.buffer.len();
+            match self
+                .reader
+                .by_ref()
+                .take(want as u64)
+                .read_to_end(&mut self.buffer)
+            {
+                Ok(got) => self.eof = got < want,
+                Err(error) => {
+                    self.buffer.clear();
+                    self.eof = true;
+                    return Some(Err(error));
+                }
+            }
+        }
+        if self.buffer.is_empty() {
+            return None;
+        }
+        let cutpoint = ultra_cdc_cutpoint(&self.resolved, &self.buffer);
+        let chunk = self.buffer[..cutpoint].to_vec();
+        self.buffer.drain(..cutpoint);
+        Some(Ok(chunk))
+    }
+}
+
+impl<R: Read> std::iter::FusedIterator for ByteChunks<R> {}
 
 // ---------------------------------------------------------------------------
 // Item chunker.
@@ -347,6 +388,30 @@ mod tests {
         })
         .expect("split_bytes");
         chunks
+    }
+
+    #[test]
+    fn byte_chunks_bounds_lookahead_and_stops_without_draining_input() {
+        let input = splitmix_data(17, 3 * DEFAULT_MAX_SIZE);
+        let mut reader = std::io::Cursor::new(&input);
+        let mut chunks = byte_chunks(&mut reader, None).unwrap();
+        assert_eq!(chunks.max_size(), DEFAULT_MAX_SIZE);
+        let first = chunks.next().unwrap().unwrap();
+        drop(chunks);
+        assert_eq!(reader.position(), DEFAULT_MAX_SIZE as u64);
+        assert_eq!(first, input[..first.len()]);
+        assert!(reader.position() < input.len() as u64);
+
+        for input in [&b""[..], &b"short"[..]] {
+            let mut chunks = byte_chunks(input, None).unwrap();
+            let mut output = Vec::new();
+            for chunk in &mut chunks {
+                output.extend(chunk.unwrap());
+            }
+            assert_eq!(output, input);
+            assert!(chunks.next().is_none());
+            assert!(chunks.next().is_none());
+        }
     }
 
     #[test]
@@ -628,6 +693,10 @@ mod tests {
         assert!(matches!(err, SplitError::Io(_)));
         // Like Go's Next, buffered bytes are not emitted on a read error.
         assert_eq!(calls, 0);
+        let mut chunks = byte_chunks(FailAfter { data: &[0x55; 100] }, None).unwrap();
+        assert!(chunks.next().unwrap().is_err());
+        assert!(chunks.next().is_none());
+        assert!(chunks.next().is_none());
     }
 
     #[test]
