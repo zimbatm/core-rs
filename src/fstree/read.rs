@@ -455,6 +455,105 @@ where
     }
 }
 
+/// Reuses decoded directories while reading related paths from one object source.
+/// Drop the reader after a bounded operation to release its decoded objects.
+/// The getter must return immutable content for each key, as for `lookup_entry`.
+pub struct DirectoryReader<G> {
+    get: G,
+    directories: std::collections::HashMap<Key, DecodedDirectory>,
+}
+
+enum DecodedDirectory {
+    Leaf(Vec<Entry>),
+    Node(Vec<super::DirPair>),
+}
+
+impl<G, E> DirectoryReader<G>
+where
+    G: FnMut(Key) -> Result<Vec<u8>, E>,
+{
+    pub fn new(get: G) -> Self {
+        Self {
+            get,
+            directories: std::collections::HashMap::new(),
+        }
+    }
+
+    pub fn lookup_entry(&mut self, dir: Key, name: &[u8]) -> Result<Entry, WalkError<E>> {
+        let mut k = dir;
+        loop {
+            let directory = match self.directories.entry(k) {
+                std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    let data =
+                        (self.get)(k).map_err(|source| WalkError::Read { key: k, source })?;
+                    let decoded = match k.type_() {
+                        Type::DirLeaf => DecodedDirectory::Leaf(
+                            decode_dir_leaf(&data)
+                                .map_err(|source| WalkError::DecodeDirLeaf { key: k, source })?,
+                        ),
+                        Type::DirNode => DecodedDirectory::Node(
+                            decode_dir_node(&data)
+                                .map_err(|source| WalkError::DecodeDirNode { key: k, source })?,
+                        ),
+                        _ => return Err(WalkError::NotDirObject { key: k }),
+                    };
+                    entry.insert(decoded)
+                }
+            };
+            match directory {
+                DecodedDirectory::Leaf(entries) => {
+                    let i = entries.partition_point(|e| e.name.as_slice() < name);
+                    return entries
+                        .get(i)
+                        .filter(|e| e.name == name)
+                        .cloned()
+                        .ok_or_else(|| WalkError::NotFound {
+                            name: name.to_vec(),
+                        });
+                }
+                DecodedDirectory::Node(pairs) => {
+                    let i = pairs.partition_point(|p| p.sep_name.as_slice() < name);
+                    let pair = pairs.get(i).ok_or_else(|| WalkError::NotFound {
+                        name: name.to_vec(),
+                    })?;
+                    k = Key::parse(&pair.child_key)
+                        .map_err(|source| WalkError::ChildKey { key: k, source })?;
+                }
+            }
+        }
+    }
+
+    pub fn resolve_path(&mut self, root: Key, path: &str) -> Result<Key, WalkError<E>> {
+        let mut k = root;
+        for comp in path.split('/') {
+            if comp.is_empty() || comp == "." {
+                continue;
+            }
+            if comp == ".." {
+                return Err(WalkError::DotDot {
+                    path: path.to_string(),
+                });
+            }
+            let found = self.lookup_entry(k, comp.as_bytes())?;
+            if found.mode & S_IFMT != S_IFDIR {
+                return Err(WalkError::NotDir {
+                    name: comp.as_bytes().to_vec(),
+                });
+            }
+            k = Key::parse(&found.content_key).map_err(|source| WalkError::ContentKey {
+                name: comp.as_bytes().to_vec(),
+                source,
+            })?;
+        }
+        Ok(k)
+    }
+
+    pub fn write_content<W: io::Write>(&mut self, w: &mut W, key: Key) -> Result<(), WalkError<E>> {
+        write_content(w, key, &mut self.get)
+    }
+}
+
 /// Descends from the directory object `root` along the slash-separated path
 /// and returns the key of the directory it names. Empty components and `"."`
 /// are ignored, so `""`, `"."`, and paths with leading/trailing slashes are
@@ -1307,6 +1406,69 @@ mod tests {
                 .unwrap_err()
                 .to_string(),
             "fstree: \"nope\": entry not found"
+        );
+    }
+
+    #[test]
+    fn directory_reader_reuses_decodes_and_matches_single_lookups() {
+        let mut store = MemStore::default();
+        let root = big_dir(&mut store, 1000);
+        let reads = std::cell::RefCell::new(std::collections::HashMap::<Key, usize>::new());
+        let mut reader = DirectoryReader::new(|k| {
+            *reads.borrow_mut().entry(k).or_default() += 1;
+            store.0.get(&k).cloned().ok_or("missing")
+        });
+        for _ in 0..2 {
+            for name in [
+                "e00000", "e00001", "e00499", "e00998", "e00999", "", "a", "zzz",
+            ] {
+                assert_eq!(
+                    reader
+                        .lookup_entry(root, name.as_bytes())
+                        .map_err(|error| error.to_string()),
+                    lookup_entry(root, name.as_bytes(), store.get())
+                        .map_err(|error| error.to_string())
+                );
+            }
+            for path in ["", ".", "/", "./", "e00000", "../e00000", "absent"] {
+                assert_eq!(
+                    reader
+                        .resolve_path(root, path)
+                        .map_err(|error| error.to_string()),
+                    resolve_path(root, path, store.get()).map_err(|error| error.to_string())
+                );
+            }
+        }
+        assert!(reads.borrow().values().all(|&count| count == 1));
+    }
+
+    #[test]
+    fn directory_reader_does_not_cache_failed_reads_or_decodes() {
+        let bytes = vec![0xff];
+        let key = Key::new(Type::DirLeaf, bytes.len() as u64, &bytes);
+        let reads = std::cell::Cell::new(0);
+        let mut reader = DirectoryReader::new(|_| {
+            reads.set(reads.get() + 1);
+            Ok::<_, &str>(bytes.clone())
+        });
+        let expected = lookup_entry(key, b"entry", |_| Ok::<_, &str>(bytes.clone()))
+            .map_err(|error| error.to_string());
+        for _ in 0..2 {
+            assert_eq!(
+                reader
+                    .lookup_entry(key, b"entry")
+                    .map_err(|error| error.to_string()),
+                expected
+            );
+        }
+        assert_eq!(reads.get(), 2);
+        let mut reader = DirectoryReader::new(|_| Err::<Vec<u8>, _>("missing"));
+        assert_eq!(
+            reader
+                .lookup_entry(key, b"entry")
+                .map_err(|error| error.to_string()),
+            lookup_entry(key, b"entry", |_| Err::<Vec<u8>, _>("missing"))
+                .map_err(|error| error.to_string())
         );
     }
 
