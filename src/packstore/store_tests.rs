@@ -2187,3 +2187,67 @@ fn many_sealed_segments_reopen_and_release_failed_open() {
     }
     restored.close().unwrap();
 }
+
+#[test]
+fn get_many_matches_reads_across_rotation_and_reopen() {
+    let dir = TempDir::new().unwrap();
+    let objects = test_objects(100);
+    let store = Store::open_with(dir.path(), Options::new().segment_size(8 << 10)).unwrap();
+    for object in &objects {
+        store.put_unflushed(object.key, &object.data).unwrap();
+    }
+    assert!(!sealed_files(dir.path()).is_empty());
+    assert!(!active_files(dir.path()).is_empty());
+    let keys: Vec<_> = objects
+        .iter()
+        .rev()
+        .chain(objects.iter().take(7))
+        .map(|o| o.key)
+        .collect();
+    for batch in keys.chunks(13) {
+        let expected: Vec<_> = batch.iter().map(|key| store.get(*key).unwrap()).collect();
+        assert_eq!(store.get_many(batch).unwrap(), expected);
+    }
+    assert!(store.get_many(&[]).unwrap().is_empty());
+    let missing = blob_obj(b"absent batch object").key;
+    assert!(matches!(
+        store.get_many(&[keys[0], missing, keys[1]]),
+        Err(Error::NotFound)
+    ));
+    store.close().unwrap();
+    assert!(matches!(store.get_many(&keys), Err(Error::Closed)));
+    assert!(matches!(store.get_many(&[]), Err(Error::Closed)));
+    let reopened = Store::open(dir.path()).unwrap();
+    let expected: Vec<_> = keys.iter().map(|key| reopened.get(*key).unwrap()).collect();
+    assert_eq!(reopened.get_many(&keys).unwrap(), expected);
+}
+
+#[test]
+fn get_many_preserves_newest_copy_corruption_semantics() {
+    let object = blob_obj(&compressible(4000));
+    for corrupt_newest in [false, true] {
+        let (dir, first, entries) = write_sealed_file(std::slice::from_ref(&object));
+        let second = dir.path().join("0000000000000002.seg");
+        fs::copy(&first, &second).unwrap();
+        let damaged = if corrupt_newest { &second } else { &first };
+        let mut bytes = fs::read(damaged).unwrap();
+        bytes[entries[0].off as usize + REC_HEADER_SIZE] ^= 0xff;
+        fs::write(damaged, bytes).unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        if corrupt_newest {
+            assert!(store.get(object.key).unwrap_err().is_corrupt());
+            assert!(
+                store
+                    .get_many(&[object.key, object.key])
+                    .unwrap_err()
+                    .is_corrupt()
+            );
+        } else {
+            assert_eq!(store.get(object.key).unwrap(), object.data);
+            assert_eq!(
+                store.get_many(&[object.key, object.key]).unwrap(),
+                vec![object.data.clone(); 2]
+            );
+        }
+    }
+}

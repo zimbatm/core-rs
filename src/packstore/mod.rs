@@ -922,6 +922,61 @@ impl Store {
         Err(Error::NotFound)
     }
 
+    /// Reads a bounded group in input order, including duplicate keys.
+    /// Segment lookup is shared across the group. Any read error rejects the
+    /// whole group; no partial result is returned. Validation matches `get`.
+    /// Callers bound memory use by limiting the keys and payloads in each group.
+    pub fn get_many(&self, keys: &[Key]) -> Result<Vec<Vec<u8>>, Error> {
+        let sh = unpoison(self.shared.read());
+        if sh.closed {
+            return Err(Error::Closed);
+        }
+        let mut output = vec![None; keys.len()];
+        let mut pending = Vec::with_capacity(keys.len());
+        if let Some(active) = &sh.active {
+            let index = unpoison(active.index.read());
+            for (position, key) in keys.iter().enumerate() {
+                if let Some(loc) = index.get(key) {
+                    let mut stored = vec![0u8; loc.slen as usize];
+                    active
+                        .f
+                        .read_exact_at(&mut stored, loc.off + REC_HEADER_SIZE as u64)?;
+                    output[position] =
+                        Some(decode_payload(loc.flags, loc.ulen, &stored).map_err(|e| {
+                            Error::Corrupt {
+                                msg: e.to_string(),
+                                verify: false,
+                            }
+                        })?);
+                } else {
+                    pending.push(position);
+                }
+            }
+        } else {
+            pending.extend(0..keys.len());
+        }
+        for segment in sh.sealed.iter().rev() {
+            if pending.is_empty() {
+                break;
+            }
+            let segment = segment.load()?;
+            let mut position = 0;
+            while position < pending.len() {
+                let slot = pending[position];
+                if let Some(bytes) = segment.get(keys[slot])? {
+                    output[slot] = Some(bytes);
+                    pending.swap_remove(position);
+                } else {
+                    position += 1;
+                }
+            }
+        }
+        output
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+            .ok_or(Error::NotFound)
+    }
+
     /// Returns a caller-owned copy of the full on-disk record stored under
     /// `k` — its 46-byte header plus the stored (still-compressed) payload,
     /// exactly as written by [`encode_record`] — or [`Error::NotFound`] if
