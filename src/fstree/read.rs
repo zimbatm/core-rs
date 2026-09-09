@@ -759,6 +759,57 @@ where
     }
 }
 
+/// Visits Blob keys in file-content order, reading only FileNode indexes.
+/// Returned Blob keys do not prove that payloads exist or pass validation.
+pub fn content_leaf_keys<G, E, B>(key: Key, get: G) -> ContentLeafKeys<G>
+where
+    G: FnMut(Key) -> Result<B, E>,
+    B: AsRef<[u8]>,
+{
+    ContentLeafKeys {
+        pending: vec![key],
+        get,
+    }
+}
+
+/// A lazy index traversal that leaves Blob reads to the caller.
+/// Errors terminate the iterator.
+pub struct ContentLeafKeys<G> {
+    pending: Vec<Key>,
+    get: G,
+}
+
+impl<G, E, B> Iterator for ContentLeafKeys<G>
+where
+    G: FnMut(Key) -> Result<B, E>,
+    B: AsRef<[u8]>,
+{
+    type Item = Result<Key, WalkError<E>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(key) = self.pending.pop() {
+            if key.type_() == Type::Blob {
+                return Some(Ok(key));
+            }
+            let result = (|| {
+                if key.type_() != Type::FileNode {
+                    return Err(WalkError::NotContentObject { key });
+                }
+                let bytes =
+                    (self.get)(key).map_err(|source| WalkError::ContentRead { key, source })?;
+                let children = decode_file_node(bytes.as_ref()).map_err(WalkError::Codec)?;
+                self.pending.extend(children.into_iter().rev());
+                Ok(())
+            })();
+            if let Err(error) = result {
+                self.pending.clear();
+                return Some(Err(error));
+            }
+        }
+        None
+    }
+}
+
 /// Visits regular-file Blob leaves in order without buffering the complete file.
 /// Errors terminate the iterator; unread leaves are not fetched.
 pub fn content_chunks<G, E, B>(key: Key, get: G) -> ContentChunks<G>
@@ -1655,6 +1706,62 @@ mod tests {
     }
 
     // --- write_content ---
+
+    #[test]
+    fn content_leaf_keys_do_not_read_payloads() {
+        use std::cell::Cell;
+        let first = encode_blob(b"first");
+        let second = encode_blob(b"second");
+        let nested = encode_file_node(&[first.key, second.key]);
+        let root = encode_file_node(&[nested.key, first.key]);
+        let store = MemStore::of(&[&nested, &root]);
+        let reads = Cell::new(0);
+        let mut keys = content_leaf_keys(root.key, |key| {
+            assert_eq!(key.type_(), Type::FileNode);
+            reads.set(reads.get() + 1);
+            store.get()(key)
+        });
+        assert_eq!(reads.get(), 0);
+        assert_eq!(keys.next().unwrap().unwrap(), first.key);
+        assert_eq!(reads.get(), 2);
+        assert_eq!(keys.next().unwrap().unwrap(), second.key);
+        assert_eq!(keys.next().unwrap().unwrap(), first.key);
+        assert!(keys.next().is_none());
+        assert_eq!(reads.get(), 2);
+
+        let keys = content_leaf_keys(first.key, |_| -> Result<Vec<u8>, String> {
+            panic!("a Blob key must not fetch its payload");
+        });
+        assert_eq!(
+            keys.collect::<Result<Vec<_>, _>>().unwrap(),
+            vec![first.key]
+        );
+    }
+
+    #[test]
+    fn content_leaf_keys_stop_after_index_errors() {
+        let blob = encode_blob(b"payload");
+        let missing = encode_file_node(&[blob.key]);
+        let root = encode_file_node(&[blob.key, missing.key, blob.key]);
+        let store = MemStore::of(&[&root]);
+        let mut keys = content_leaf_keys(root.key, store.get());
+        assert_eq!(keys.next().unwrap().unwrap(), blob.key);
+        assert!(
+            matches!(keys.next().unwrap(), Err(WalkError::ContentRead { key, .. }) if key == missing.key)
+        );
+        assert!(keys.next().is_none());
+
+        let invalid = encode_dir_leaf(&[]).unwrap();
+        let mut keys = content_leaf_keys(invalid.key, store.get());
+        assert!(
+            matches!(keys.next().unwrap(), Err(WalkError::NotContentObject { key }) if key == invalid.key)
+        );
+        assert!(keys.next().is_none());
+
+        let mut keys = content_leaf_keys(root.key, |_| Ok::<_, String>(Vec::<u8>::new()));
+        assert!(matches!(keys.next().unwrap(), Err(WalkError::Codec(_))));
+        assert!(keys.next().is_none());
+    }
 
     #[test]
     fn content_chunks_are_lazy_ordered_and_stop_on_error() {
