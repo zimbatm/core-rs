@@ -836,3 +836,89 @@ fn record_view_survives_collection_without_expanding_scope() {
         Err(super::Error::NotFound)
     ));
 }
+
+#[test]
+fn sealed_membership_roundtrip_preserves_exact_subset() {
+    let (dir, store, objects) = compact_store();
+    assert!(store.new_mark_set().into_sealed_membership().is_err());
+    let snapshot = store.seal_snapshot().unwrap();
+    let mut marks = store.new_mark_set();
+    for index in [0, 2, 4] {
+        assert_eq!(marks.mark(objects[index].key), (true, true));
+    }
+    let membership = marks.into_sealed_membership().unwrap();
+    let bitmaps = membership.bitmaps();
+    let restored = snapshot.restore_membership(&bitmaps).unwrap();
+    for (index, object) in objects.iter().enumerate() {
+        assert_eq!(restored.contains(object.key), index % 2 == 0);
+    }
+    store.close().unwrap();
+    let reopened = Store::open(dir.path()).unwrap();
+    let extra = blob_obj(b"later segment excluded from old membership");
+    reopened.put(extra.key, &extra.data).unwrap();
+    let current = reopened.seal_snapshot().unwrap();
+    let restored = current.restore_membership(&bitmaps).unwrap();
+    assert!(!restored.contains(extra.key));
+    assert!(!restored.contains(blob_obj(b"absent").key));
+    for (index, object) in objects.iter().enumerate() {
+        assert_eq!(restored.contains(object.key), index % 2 == 0);
+    }
+    reopened.compact(|_| false, CompactOpts::default()).unwrap();
+    assert!(
+        reopened
+            .seal_snapshot()
+            .unwrap()
+            .restore_membership(&bitmaps)
+            .is_err()
+    );
+    assert!(restored.contains(objects[0].key));
+}
+
+#[test]
+fn sealed_membership_rejects_invalid_layouts() {
+    let dir = TempDir::new().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let objects: Vec<_> = (0..130)
+        .map(|i| blob_obj(format!("membership {i}").as_bytes()))
+        .collect();
+    for object in &objects {
+        store.put(object.key, &object.data).unwrap();
+    }
+    let snapshot = store.seal_snapshot().unwrap();
+    let mut marks = store.new_mark_set();
+    for object in objects.iter().step_by(3) {
+        marks.mark(object.key);
+    }
+    let bitmaps = marks.into_sealed_membership().unwrap().bitmaps();
+    assert_eq!(bitmaps.len(), 1);
+    assert_eq!(bitmaps[0].record_count, 130);
+    assert_eq!(bitmaps[0].words.len(), 3);
+    let restored = snapshot.restore_membership(&bitmaps).unwrap();
+    for (index, object) in objects.iter().enumerate() {
+        assert_eq!(restored.contains(object.key), index % 3 == 0);
+    }
+    let mut invalid = bitmaps.clone();
+    invalid[0].record_count += 1;
+    assert!(snapshot.restore_membership(&invalid).is_err());
+    let mut invalid = bitmaps.clone();
+    invalid[0].words.pop();
+    assert!(snapshot.restore_membership(&invalid).is_err());
+    let mut invalid = bitmaps.clone();
+    invalid[0].words.push(0);
+    assert!(snapshot.restore_membership(&invalid).is_err());
+    let mut invalid = bitmaps.clone();
+    invalid[0].words[2] |= 1 << 63;
+    assert!(snapshot.restore_membership(&invalid).is_err());
+    let mut invalid = bitmaps.clone();
+    invalid[0].segment_id = u64::MAX;
+    assert!(snapshot.restore_membership(&invalid).is_err());
+    let mut invalid = bitmaps.clone();
+    invalid.push(bitmaps[0].clone());
+    assert!(snapshot.restore_membership(&invalid).is_err());
+    assert!(
+        !snapshot
+            .restore_membership(&[])
+            .unwrap()
+            .contains(objects[0].key)
+    );
+}

@@ -118,3 +118,100 @@ impl MarkSet {
         self.marked
     }
 }
+
+/// Untrusted serialized membership for one immutable segment.
+/// Bit positions refer to its exact footer layout. Callers must authenticate
+/// both these values and the segment bytes before relying on membership.
+#[derive(Clone, Debug)]
+pub struct SegmentBitmap {
+    pub segment_id: u64,
+    pub record_count: u64,
+    pub words: Vec<u64>,
+}
+
+/// Exact membership in captured sealed records, independent of GC liveness.
+/// This does not prove reachability, completeness, or current store presence.
+pub struct SealedMembership {
+    marks: MarkSet,
+}
+
+impl MarkSet {
+    /// Consumes marks only when their snapshot has no active records.
+    /// Seal the store before creating the mark set used for persistence.
+    pub fn into_sealed_membership(self) -> Result<SealedMembership, super::Error> {
+        if !self.active.is_empty() {
+            return Err(super::corrupt(
+                "membership snapshot contains active records",
+            ));
+        }
+        Ok(SealedMembership { marks: self })
+    }
+}
+
+impl SealedMembership {
+    pub fn contains(&self, key: Key) -> bool {
+        self.marks.contains(key)
+    }
+
+    /// Copies portable bitmap values for caller-defined authenticated encoding.
+    pub fn bitmaps(&self) -> Vec<SegmentBitmap> {
+        self.marks
+            .segs
+            .iter()
+            .zip(&self.marks.bits)
+            .map(|(segment, words)| SegmentBitmap {
+                segment_id: segment.id,
+                record_count: segment.fv.key_count,
+                words: words.clone(),
+            })
+            .collect()
+    }
+}
+
+impl super::SegmentSnapshot {
+    /// Restores exact membership against this capture's footer layouts.
+    /// IDs must be strictly increasing; counts, lengths, and padding must match.
+    /// This validates structure only. The caller must authenticate the bitmap
+    /// and each referenced segment's bytes. Extra captured segments are excluded.
+    /// Retained captures do not establish current store presence after collection.
+    pub fn restore_membership(
+        &self,
+        bitmaps: &[SegmentBitmap],
+    ) -> Result<SealedMembership, super::Error> {
+        let mut marks = MarkSet {
+            segs: Vec::with_capacity(bitmaps.len()),
+            bits: Vec::with_capacity(bitmaps.len()),
+            active: HashMap::new(),
+            marked: 0,
+        };
+        let mut previous = None;
+        for bitmap in bitmaps {
+            if previous.is_some_and(|id| id >= bitmap.segment_id) {
+                return Err(super::corrupt("membership segment order"));
+            }
+            previous = Some(bitmap.segment_id);
+            let index = self
+                .segments
+                .binary_search_by_key(&bitmap.segment_id, |s| s.id)
+                .map_err(|_| super::corrupt("missing membership segment"))?;
+            let segment = &self.segments[index];
+            if bitmap.record_count != segment.fv.key_count
+                || bitmap.words.len() as u64 != bitmap.record_count.div_ceil(64)
+            {
+                return Err(super::corrupt("membership footer layout mismatch"));
+            }
+            let remainder = bitmap.record_count % 64;
+            if remainder != 0
+                && bitmap
+                    .words
+                    .last()
+                    .is_some_and(|word| word >> remainder != 0)
+            {
+                return Err(super::corrupt("membership padding is nonzero"));
+            }
+            marks.segs.push(segment.clone());
+            marks.bits.push(bitmap.words.clone());
+        }
+        Ok(SealedMembership { marks })
+    }
+}

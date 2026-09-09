@@ -14,6 +14,7 @@ use super::{Error, Store, corrupt, unpoison};
 #[derive(Debug)]
 pub struct SegmentSnapshot {
     files: Vec<(u64, File)>,
+    pub(super) segments: Vec<std::sync::Arc<super::footer::SealedSegment>>,
 }
 
 impl SegmentSnapshot {
@@ -59,6 +60,9 @@ impl Store {
             }
             files.push((segment.id, file));
         }
-        Ok(SegmentSnapshot { files })
+        Ok(SegmentSnapshot {
+            files,
+            segments: sh.sealed.clone(),
+        })
     }
 }
