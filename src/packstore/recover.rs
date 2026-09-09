@@ -40,7 +40,14 @@ pub(crate) fn scan_active(path: &Path) -> io::Result<ScanResult> {
         index: HashMap::new(),
         sealed: false,
     };
-    let b = fs::read(path)?;
+    let file = fs::File::open(path)?;
+    if file.metadata()?.len() < MAGIC_HEADER.len() as u64 {
+        return Ok(res);
+    }
+    // Recovery requires exclusive store access. No writer may truncate or
+    // replace this active file while its temporary read-only mapping exists.
+    // The mapping is dropped before the caller truncates the recovered tail.
+    let b = unsafe { memmap2::MmapOptions::new().map(&file)? };
     if b.len() < MAGIC_HEADER.len() || b[..MAGIC_HEADER.len()] != MAGIC_HEADER {
         // Header never made it to disk; nothing in this file was ever
         // acknowledged (any successful fsync would have persisted the header
