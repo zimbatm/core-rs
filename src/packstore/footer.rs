@@ -408,6 +408,18 @@ impl SealedSegment {
     /// error. The hot path does not CRC-check; that is scrub's job (Go:
     /// `get`).
     pub(crate) fn get(&self, k: Key) -> Result<Option<Vec<u8>>, Error> {
+        self.get_with_pattern(k, super::ReadPattern::Normal)
+    }
+
+    pub(crate) fn get_sparse(&self, k: Key) -> Result<Option<Vec<u8>>, Error> {
+        self.get_with_pattern(k, super::ReadPattern::Sparse)
+    }
+
+    fn get_with_pattern(
+        &self,
+        k: Key,
+        pattern: super::ReadPattern,
+    ) -> Result<Option<Vec<u8>>, Error> {
         if !self.fv.filter.contains(filter_key(k)) {
             return Ok(None);
         }
@@ -415,16 +427,34 @@ impl SealedSegment {
             return Ok(None);
         };
         let (start, end) = self.record_span(off, slen)?;
-        let h = &self.mm[start..start + REC_HEADER_SIZE];
-        let flags = h[33];
-        let ulen = be_u32(h, 34);
-        match decode_payload(flags, ulen, &self.mm[start + REC_HEADER_SIZE..end]) {
-            Ok(data) => Ok(Some(data)),
-            Err(e) => Err(Error::Corrupt {
-                msg: format!("{}: {e}", self.path.display()),
-                verify: false,
-            }),
+        #[cfg(target_os = "linux")]
+        if pattern == super::ReadPattern::Sparse {
+            self.mm
+                .advise_range(memmap2::Advice::Random, start, end - start)?;
         }
+        let result = (|| {
+            #[cfg(target_os = "linux")]
+            if pattern == super::ReadPattern::Sparse && end - start > 4096 {
+                self.mm
+                    .advise_range(memmap2::Advice::WillNeed, start, end - start)?;
+            }
+            let h = &self.mm[start..start + REC_HEADER_SIZE];
+            let flags = h[33];
+            let ulen = be_u32(h, 34);
+            match decode_payload(flags, ulen, &self.mm[start + REC_HEADER_SIZE..end]) {
+                Ok(data) => Ok(Some(data)),
+                Err(e) => Err(Error::Corrupt {
+                    msg: format!("{}: {e}", self.path.display()),
+                    verify: false,
+                }),
+            }
+        })();
+        #[cfg(target_os = "linux")]
+        if pattern == super::ReadPattern::Sparse {
+            self.mm
+                .advise_range(memmap2::Advice::Normal, start, end - start)?;
+        }
+        result
     }
 
     /// Returns a caller-owned copy of `k`'s full on-disk record (header +

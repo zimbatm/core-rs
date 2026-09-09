@@ -38,6 +38,17 @@
 
       packages = eachSystem (
         system: pkgs: {
+          store-check = pkgs.rustPlatform.buildRustPackage {
+            pname = "amber-core-store-check";
+            version = "0.1.0";
+            src = self;
+            cargoLock.lockFile = ./Cargo.lock;
+            cargoTestFlags = [
+              "--lib"
+              "packstore::"
+            ];
+            installPhase = "mkdir -p $out";
+          };
           checksum-bench = pkgs.rustPlatform.buildRustPackage {
             pname = "amber-core-checksum-bench";
             version = "0.1.0";

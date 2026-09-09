@@ -2099,3 +2099,58 @@ fn segment_snapshot_rejects_replaced_paths() {
     assert_eq!(reopened.get(object.key).unwrap(), object.data);
     assert_eq!(reopened.seal_snapshot().unwrap().files().len(), 1);
 }
+
+#[test]
+fn sparse_reads_match_normal_across_rotation_and_restart() {
+    let dir = TempDir::new().unwrap();
+    let objects = [
+        blob_obj(b"small sparse record"),
+        blob_obj(&incompressible(64 << 10)),
+        blob_obj(&compressible(64 << 10)),
+        blob_obj(b"active record after rotation"),
+    ];
+    let store = Store::open_with(dir.path(), Options::new().segment_size(8 << 10)).unwrap();
+    for object in &objects {
+        store.put(object.key, &object.data).unwrap();
+    }
+    assert!(!sealed_files(dir.path()).is_empty());
+    let check = |store: &Store| {
+        for object in &objects {
+            for pattern in [super::ReadPattern::Sparse, super::ReadPattern::Normal] {
+                assert_eq!(
+                    store.get_with_pattern(object.key, pattern).unwrap(),
+                    object.data
+                );
+            }
+        }
+        let missing = blob_obj(b"absent sparse record");
+        assert!(matches!(
+            store.get_with_pattern(missing.key, super::ReadPattern::Sparse),
+            Err(Error::NotFound)
+        ));
+        thread::scope(|scope| {
+            for pattern in [super::ReadPattern::Sparse, super::ReadPattern::Normal] {
+                let objects = &objects;
+                scope.spawn(move || {
+                    for _ in 0..8 {
+                        for object in objects {
+                            assert_eq!(
+                                store.get_with_pattern(object.key, pattern).unwrap(),
+                                object.data
+                            );
+                        }
+                    }
+                });
+            }
+        });
+    };
+    check(&store);
+    store.close().unwrap();
+    assert!(matches!(
+        store.get_with_pattern(objects[0].key, super::ReadPattern::Sparse),
+        Err(Error::Closed)
+    ));
+    let reopened = Store::open(dir.path()).unwrap();
+    check(&reopened);
+    reopened.close().unwrap();
+}

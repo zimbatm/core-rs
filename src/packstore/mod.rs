@@ -278,6 +278,12 @@ struct Shared {
     failed: Option<String>, // sticky write-path failure detail
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadPattern {
+    Normal,
+    Sparse,
+}
+
 /// An on-disk content-addressable store over segment files. It is safe for
 /// concurrent use. Lock ordering: the append lock before the shared lock,
 /// never the reverse. The append lock serializes the write path (append,
@@ -814,6 +820,12 @@ impl Store {
     /// Returns the bytes stored under `k`, or [`Error::NotFound`] if `k` is
     /// absent. The returned buffer is caller-owned (Go: `Get`).
     pub fn get(&self, k: Key) -> Result<Vec<u8>, Error> {
+        self.get_with_pattern(k, ReadPattern::Normal)
+    }
+
+    /// Selects advisory record access without changing validation or read semantics.
+    /// Overlapping concurrent readers can affect each other's read-ahead hints.
+    pub fn get_with_pattern(&self, k: Key, pattern: ReadPattern) -> Result<Vec<u8>, Error> {
         let sh = unpoison(self.shared.read());
         if sh.closed {
             return Err(Error::Closed);
@@ -833,7 +845,11 @@ impl Store {
             // A corrupt segment fails the read loudly rather than falling
             // back to older copies: masking corruption would hide real damage
             // from scrub.
-            if let Some(data) = seg.get(k)? {
+            let data = match pattern {
+                ReadPattern::Normal => seg.get(k)?,
+                ReadPattern::Sparse => seg.get_sparse(k)?,
+            };
+            if let Some(data) = data {
                 return Ok(data);
             }
         }
