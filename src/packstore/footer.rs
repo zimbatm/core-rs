@@ -394,6 +394,9 @@ impl SealedSegment {
         let integrity = match proof {
             Some(proof) => {
                 proof.verify(&f)?;
+                // Authenticated opening touches only footer headers and fanout pages.
+                #[cfg(target_os = "linux")]
+                mm.advise(memmap2::Advice::Random)?;
                 FooterIntegrity::VerifiedImmutable
             }
             None => FooterIntegrity::Checksum,
