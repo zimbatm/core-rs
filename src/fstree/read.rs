@@ -12,8 +12,6 @@
 use std::collections::HashSet;
 use std::fmt;
 use std::io;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::{Entry, Error, decode_dir_leaf, decode_dir_node, decode_file_node};
 use crate::key::{self, Key, Type};
@@ -1029,29 +1027,21 @@ where
     if workers <= 1 {
         return items.iter().map(|&k| f(k)).collect();
     }
-    let next = AtomicUsize::new(0);
-    let slots: Vec<Mutex<Option<Result<T, E>>>> = items.iter().map(|_| Mutex::new(None)).collect();
-    std::thread::scope(|s| {
-        for _ in 0..workers {
-            s.spawn(|| {
-                loop {
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    if i >= items.len() {
-                        break;
-                    }
-                    let r = f(items[i]);
-                    *slots[i].lock().expect("result slot lock") = Some(r);
+    let chunk_size = items.len().div_ceil(workers);
+    let mut slots: Vec<Option<Result<T, E>>> = items.iter().map(|_| None).collect();
+    std::thread::scope(|scope| {
+        for (keys, output) in items.chunks(chunk_size).zip(slots.chunks_mut(chunk_size)) {
+            let f = &f;
+            scope.spawn(move || {
+                for (&key, slot) in keys.iter().zip(output) {
+                    *slot = Some(f(key));
                 }
             });
         }
     });
     slots
         .into_iter()
-        .map(|m| {
-            m.into_inner()
-                .expect("result slot lock")
-                .expect("worker filled every slot")
-        })
+        .map(|slot| slot.expect("worker filled every slot"))
         .collect()
 }
 
@@ -1059,6 +1049,7 @@ where
 mod tests {
     use std::collections::HashMap;
     use std::convert::Infallible;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::super::{
         DirBuilder, DirPair, Object, encode_blob, encode_dir_leaf, encode_dir_node,
@@ -1067,6 +1058,39 @@ mod tests {
     use super::*;
     use crate::chunkers::ItemChunker;
 
+    #[test]
+    fn parallel_map_preserves_order_and_processes_errors_once() {
+        let keys: Vec<_> = (0u8..37).map(|index| encode_blob(&[index]).key).collect();
+        let positions: HashMap<_, _> = keys
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(i, key)| (key, i))
+            .collect();
+        for jobs in [1, 2, 4, 64] {
+            let calls: Vec<_> = keys.iter().map(|_| AtomicUsize::new(0)).collect();
+            let results = parallel_map(&keys, jobs, |key| {
+                let index = positions[&key];
+                calls[index].fetch_add(1, Ordering::Relaxed);
+                if index % 7 == 0 {
+                    std::thread::yield_now();
+                    Err(index)
+                } else {
+                    Ok(Box::new(index))
+                }
+            });
+            assert_eq!(results.len(), keys.len());
+            for (index, result) in results.into_iter().enumerate() {
+                assert_eq!(calls[index].load(Ordering::Relaxed), 1);
+                if index % 7 == 0 {
+                    assert_eq!(result, Err(index));
+                } else {
+                    assert_eq!(result, Ok(Box::new(index)));
+                }
+            }
+        }
+        assert!(parallel_map::<(), (), _>(&[], 4, |_| panic!("empty frontier")).is_empty());
+    }
     /// An in-memory object store for builder-emitted objects (Go `memStore` /
     /// `mapGetter`).
     #[derive(Default, Clone)]
