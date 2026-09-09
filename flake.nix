@@ -68,6 +68,7 @@
             cargoLock.lockFile = ./Cargo.lock;
             cargoTestFlags = [
               "--lib"
+              "--all-features"
             ];
             installPhase = "mkdir -p $out";
           };

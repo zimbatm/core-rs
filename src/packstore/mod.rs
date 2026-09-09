@@ -882,13 +882,19 @@ impl Store {
             if let Some(loc) = loc {
                 let mut stored = vec![0u8; loc.slen as usize];
                 a.f.read_exact_at(&mut stored, loc.off + REC_HEADER_SIZE as u64)?;
+                #[cfg(feature = "read-trace")]
+                eprintln!(
+                    "amber.read key={k} segment={} probes=0 sealed={}",
+                    a.id,
+                    sh.sealed.len()
+                );
                 return decode_payload(loc.flags, loc.ulen, &stored).map_err(|e| Error::Corrupt {
                     msg: e.to_string(),
                     verify: false,
                 });
             }
         }
-        for seg in sh.sealed.iter().rev() {
+        for (_position, seg) in sh.sealed.iter().rev().enumerate() {
             // A corrupt segment fails the read loudly rather than falling
             // back to older copies: masking corruption would hide real damage
             // from scrub.
@@ -897,6 +903,13 @@ impl Store {
                 ReadPattern::Sparse => seg.get_sparse(k)?,
             };
             if let Some(data) = data {
+                #[cfg(feature = "read-trace")]
+                eprintln!(
+                    "amber.read key={k} segment={} probes={} sealed={}",
+                    seg.id,
+                    _position + 1,
+                    sh.sealed.len()
+                );
                 return Ok(data);
             }
         }

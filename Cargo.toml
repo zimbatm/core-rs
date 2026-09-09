@@ -8,6 +8,9 @@ repository = "https://github.com/amber-store/core-rs"
 keywords = ["content-addressable", "cas", "merkle", "cdc", "storage"]
 categories = ["filesystem", "data-structures"]
 
+[features]
+read-trace = []
+
 [dependencies]
 blake3 = "1"
 crc-fast = { version = "1.10.0", default-features = false, features = ["std"] }
