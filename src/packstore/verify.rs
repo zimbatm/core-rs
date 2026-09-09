@@ -72,7 +72,7 @@ impl SealedSegment {
                     verify: true,
                 });
             }
-            if !self.fv.filter.contains(filter_key(rec.key)) {
+            if !self.fv.filter_contains(&self.mm, filter_key(rec.key)) {
                 return Err(Error::Corrupt {
                     msg: format!(
                         "amberpack: corrupt pack data: {path}: filter missing key {} (offset {off})",

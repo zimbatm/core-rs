@@ -67,7 +67,7 @@ impl MarkSet {
             return Some(Loc::Active);
         }
         for (i, g) in self.segs.iter().enumerate().rev() {
-            if !g.fv.filter.contains(filter_key(k)) {
+            if !g.fv.filter_contains(&g.mm, filter_key(k)) {
                 continue;
             }
             if let Some(pos) = g.fv.lookup_pos(&g.mm, k) {

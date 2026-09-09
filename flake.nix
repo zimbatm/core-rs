@@ -45,7 +45,6 @@
             cargoLock.lockFile = ./Cargo.lock;
             cargoTestFlags = [
               "--lib"
-              "packstore::"
             ];
             installPhase = "mkdir -p $out";
           };

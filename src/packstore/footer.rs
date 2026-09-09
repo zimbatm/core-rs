@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use memmap2::Mmap;
 
 use crate::amberpack::{REC_HEADER_SIZE, decode_payload};
-use crate::binaryfuse::{BinaryFuse16, SECTION_HEADER_SIZE};
+use crate::binaryfuse::{BinaryFuse16, BinaryFuse16Layout, SECTION_HEADER_SIZE};
 use crate::key::{self, Key};
 
 use super::{Error, MAGIC_HEADER, MAGIC_TRAILER, TAG_SEAL, be_u32, corrupt};
@@ -139,6 +139,7 @@ pub(crate) fn build_filter_section(entries: &[IndexEntry]) -> Result<Vec<u8>, Er
 /// be a read-only mmap) into RAM. The geometry fields are validated so
 /// crafted values fail parse with a corrupt error rather than panicking the
 /// read path (Go: `parseFilterSection`).
+#[cfg(test)]
 pub(crate) fn parse_filter_section(b: &[u8]) -> Result<BinaryFuse16, Error> {
     BinaryFuse16::parse_section(b).map_err(corrupt)
 }
@@ -213,7 +214,7 @@ pub(crate) fn build_footer(body_len: u64, entries: &[IndexEntry]) -> Result<Vec<
     Ok(ftr)
 }
 
-/// The parsed footer of a sealed segment. `fanout` and `filter` live in RAM;
+/// The parsed footer of a sealed segment. `fanout` and filter geometry live in RAM;
 /// the entry rows stay in the segment image at
 /// `entries_off..entries_off + entries_len` (Go: `footerView`, whose
 /// `entries` points into the mmap).
@@ -221,7 +222,8 @@ pub(crate) struct FooterView {
     pub fanout: [u32; 256],
     pub entries_off: usize,
     pub entries_len: usize,
-    pub filter: BinaryFuse16,
+    filter: BinaryFuse16Layout,
+    filter_range: std::ops::Range<usize>,
     pub key_count: u64,
     pub body_len: u64,
     pub index_off: u64,
@@ -229,6 +231,10 @@ pub(crate) struct FooterView {
 }
 
 impl FooterView {
+    pub(crate) fn filter_contains(&self, image: &[u8], key: u64) -> bool {
+        self.filter.contains(&image[self.filter_range.clone()], key)
+    }
+
     /// Finds `k` in the segment's index (Go: `footerView.lookup`).
     pub(crate) fn lookup(&self, image: &[u8], k: Key) -> Option<(u64, u32)> {
         let entries = &image[self.entries_off..self.entries_off + self.entries_len];
@@ -304,13 +310,14 @@ pub(crate) fn parse_footer(mm: &[u8]) -> Result<FooterView, Error> {
         &mm[index_off as usize..(index_off + index_len) as usize],
         key_count,
     )?;
-    let filter =
-        parse_filter_section(&mm[filter_off as usize..(filter_off + filter_len) as usize])?;
+    let filter_range = filter_off as usize..(filter_off + filter_len) as usize;
+    let filter = BinaryFuse16Layout::parse_section(&mm[filter_range.clone()]).map_err(corrupt)?;
     Ok(FooterView {
         fanout,
         entries_off: index_off as usize + FANOUT_SIZE,
         entries_len: index_len as usize - FANOUT_SIZE,
         filter,
+        filter_range,
         key_count,
         body_len,
         index_off,
@@ -384,7 +391,7 @@ impl SealedSegment {
     /// Reports whether `k` is in this segment: fuse filter first (cheap,
     /// probabilistic), then the exact index (Go: `has`).
     pub(crate) fn has(&self, k: Key) -> bool {
-        self.fv.filter.contains(filter_key(k)) && self.fv.lookup(&self.mm, k).is_some()
+        self.fv.filter_contains(&self.mm, filter_key(k)) && self.fv.lookup(&self.mm, k).is_some()
     }
 
     /// Bounds-checks an index entry and returns the record's byte range in
@@ -420,7 +427,7 @@ impl SealedSegment {
         k: Key,
         pattern: super::ReadPattern,
     ) -> Result<Option<Vec<u8>>, Error> {
-        if !self.fv.filter.contains(filter_key(k)) {
+        if !self.fv.filter_contains(&self.mm, filter_key(k)) {
             return Ok(None);
         }
         let Some((off, slen)) = self.fv.lookup(&self.mm, k) else {
@@ -478,7 +485,7 @@ impl SealedSegment {
     }
 
     pub(crate) fn locate_record(&self, k: Key) -> Option<(u64, u32)> {
-        if !self.fv.filter.contains(filter_key(k)) {
+        if !self.fv.filter_contains(&self.mm, filter_key(k)) {
             return None;
         }
         self.fv.lookup(&self.mm, k)
@@ -487,7 +494,7 @@ impl SealedSegment {
     /// Returns `k`'s stored (post-compression) payload length if present,
     /// from the index alone — no payload read (Go: `storedSize`).
     pub(crate) fn stored_size(&self, k: Key) -> Option<u32> {
-        if !self.fv.filter.contains(filter_key(k)) {
+        if !self.fv.filter_contains(&self.mm, filter_key(k)) {
             return None;
         }
         self.fv.lookup(&self.mm, k).map(|(_, slen)| slen)
@@ -496,7 +503,7 @@ impl SealedSegment {
     /// Returns `k`'s record offset within this segment if present, from the
     /// index alone — for ordering reads by disk layout (Go: `locate`).
     pub(crate) fn locate(&self, k: Key) -> Option<u64> {
-        if !self.fv.filter.contains(filter_key(k)) {
+        if !self.fv.filter_contains(&self.mm, filter_key(k)) {
             return None;
         }
         self.fv.lookup(&self.mm, k).map(|(off, _)| off)

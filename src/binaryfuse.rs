@@ -625,6 +625,35 @@ impl BinaryFuse16 {
     /// validation exists to prevent). Real filters always have
     /// `segment_count >= 1`, so no Go-written section is affected.
     pub fn parse_section(b: &[u8]) -> Result<BinaryFuse16, Error> {
+        let layout = BinaryFuse16Layout::parse_section(b)?;
+        Ok(BinaryFuse16 {
+            seed: layout.seed,
+            segment_length: layout.segment_length,
+            segment_length_mask: layout.segment_length_mask,
+            segment_count: layout.segment_count,
+            segment_count_length: layout.segment_count_length,
+            fingerprints: b[SECTION_HEADER_SIZE..]
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|bytes| u16::from_be_bytes(*bytes))
+                .collect(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BinaryFuse16Layout {
+    seed: u64,
+    segment_length: u32,
+    segment_length_mask: u32,
+    segment_count: u32,
+    segment_count_length: u32,
+    fingerprint_count: u32,
+}
+
+impl BinaryFuse16Layout {
+    pub(crate) fn parse_section(b: &[u8]) -> Result<Self, Error> {
         if b.len() < SECTION_HEADER_SIZE {
             return Err(Error::Corrupt(format!(
                 "filter section too short: {} bytes",
@@ -656,19 +685,34 @@ impl BinaryFuse16 {
         {
             return Err(Error::Corrupt("filter geometry invalid".to_string()));
         }
-        Ok(BinaryFuse16 {
-            seed: u64::from_be_bytes([b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8]]),
+
+        Ok(Self {
+            seed: u64::from_be_bytes(b[1..9].try_into().unwrap()),
             segment_length: seg_len,
             segment_length_mask: seg_len_mask,
             segment_count: seg_count,
             segment_count_length: seg_count_len,
-            fingerprints: b[SECTION_HEADER_SIZE..]
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|c| u16::from_be_bytes(*c))
-                .collect(),
+            fingerprint_count: fp_count,
         })
+    }
+
+    pub(crate) fn contains(&self, section: &[u8], key: u64) -> bool {
+        // The owning footer binds this layout to its validated immutable section.
+        assert_eq!(
+            section.len() as u64,
+            SECTION_HEADER_SIZE as u64 + 2 * u64::from(self.fingerprint_count)
+        );
+        let hash = mixsplit(key, self.seed);
+        let h0 = ((u128::from(hash) * u128::from(self.segment_count_length)) >> 64) as u32;
+        let h1 = (h0 + self.segment_length) ^ ((hash >> 18) as u32 & self.segment_length_mask);
+        let h2 = (h0 + self.segment_length + self.segment_length)
+            ^ (hash as u32 & self.segment_length_mask);
+        let fingerprints = section[SECTION_HEADER_SIZE..].as_chunks::<2>().0;
+        fingerprint(hash) as u16
+            ^ u16::from_be_bytes(fingerprints[h0 as usize])
+            ^ u16::from_be_bytes(fingerprints[h1 as usize])
+            ^ u16::from_be_bytes(fingerprints[h2 as usize])
+            == 0
     }
 }
 
@@ -1175,6 +1219,33 @@ mod tests {
             let f = BinaryFuse16::new(&keys).unwrap_or_else(|e| panic!("n={n}: {e}"));
             for &k in &keys {
                 assert!(f.contains(k), "n={n}: missing key {k:#x}");
+            }
+        }
+    }
+
+    #[test]
+    fn mapped_filter_matches_owned() {
+        for n in [0, 1, 2, 17, 256, 4096] {
+            let keys = sorted_dedup(u64s(42, n));
+            let owned = BinaryFuse16::new(&keys).unwrap();
+            let section = owned.section_bytes();
+            let layout = BinaryFuse16Layout::parse_section(&section).unwrap();
+            assert_eq!(BinaryFuse16::parse_section(&section).unwrap(), owned);
+            for key in keys.iter().copied().chain(u64s(991, 20_000)) {
+                assert_eq!(
+                    layout.contains(&section, key),
+                    owned.contains(key),
+                    "n={n}, key={key}"
+                );
+            }
+            // Compare arbitrary non-symmetric fingerprint bytes, including false positives.
+            let mut changed = section.clone();
+            for (i, byte) in changed[SECTION_HEADER_SIZE..].iter_mut().enumerate() {
+                *byte = (i.wrapping_mul(73).wrapping_add(19)) as u8;
+            }
+            let changed_owned = BinaryFuse16::parse_section(&changed).unwrap();
+            for key in u64s(19, 20_000) {
+                assert_eq!(layout.contains(&changed, key), changed_owned.contains(key));
             }
         }
     }
