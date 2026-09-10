@@ -169,13 +169,32 @@ impl Store {
     /// ascending by id with the active segment last: the GC dry run (Go:
     /// `Liveness`).
     pub fn liveness(&self, live: impl Fn(Key) -> bool) -> Result<Vec<SegmentLiveness>, Error> {
+        self.liveness_records(|_, _, key| live(key), &live)
+    }
+
+    /// Classifies records against captured marks without collecting or publishing.
+    pub fn liveness_marked(&self, marks: &super::MarkSet) -> Result<Vec<SegmentLiveness>, Error> {
+        if marks.marked() == 0 {
+            return self.liveness(|_| false);
+        }
+        self.liveness_records(
+            |segment, position, key| marks.contains_record(segment, position, key),
+            |key| marks.contains(key),
+        )
+    }
+
+    fn liveness_records(
+        &self,
+        sealed: impl Fn(&SealedSegment, usize, Key) -> bool,
+        active: impl Fn(Key) -> bool,
+    ) -> Result<Vec<SegmentLiveness>, Error> {
         let sh = unpoison(self.shared.read());
         if sh.closed {
             return Err(Error::Closed);
         }
         let mut report = Vec::new();
         for g in &sh.sealed {
-            report.push(segment_liveness(g.load()?, &|_, _, key| live(key)));
+            report.push(segment_liveness(g.load()?, &sealed));
         }
         if let Some(a) = &sh.active {
             let mut info = SegmentLiveness {
@@ -183,7 +202,7 @@ impl Store {
                 ..SegmentLiveness::default()
             };
             for (k, loc) in unpoison(a.index.read()).iter() {
-                info.add(live(*k), loc.slen);
+                info.add(active(*k), loc.slen);
             }
             report.push(info);
         }

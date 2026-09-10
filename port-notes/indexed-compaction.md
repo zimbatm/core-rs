@@ -34,10 +34,12 @@ The evidence records the actual Core source separately.
 
 ## Performance and memory limits
 
-Compaction speed and CPU savings remain unmeasured.
+Complete compaction speed remains unmeasured.
+[Paired record-classification measurements](indexed-liveness.md) improved across all tested live fractions and both layouts.
 Live marked records can avoid repeated key searches.
 Unmarked records pay the additional slot check before logical lookup.
-A paired comparison must include different live fractions before adoption.
+The comparison covers clustered and mixed marks at five live fractions.
+Downstream validation remains necessary before Forge adoption.
 
 Verified collections still retain owned closure keys.
 This candidate targets sweep CPU, not that key buffer.

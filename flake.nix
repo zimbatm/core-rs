@@ -72,6 +72,22 @@
             ];
             installPhase = "mkdir -p $out";
           };
+          indexed-liveness-bench = pkgs.rustPlatform.buildRustPackage {
+            pname = "amber-core-indexed-liveness-bench";
+            version = "0.1.0";
+            src = self;
+            cargoLock.lockFile = ./Cargo.lock;
+            cargoBuildFlags = [
+              "--example"
+              "indexed-liveness-profile"
+            ];
+            doCheck = false;
+            installPhase = ''
+              runHook preInstall
+              install -Dm755 target/${pkgs.stdenv.hostPlatform.rust.rustcTarget}/release/examples/indexed-liveness-profile $out/bin/indexed-liveness-profile
+              runHook postInstall
+            '';
+          };
           checksum-bench = pkgs.rustPlatform.buildRustPackage {
             pname = "amber-core-checksum-bench";
             version = "0.1.0";

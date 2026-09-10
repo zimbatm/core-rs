@@ -1,0 +1,693 @@
+[
+  {
+    "name": "indexed-liveness-01",
+    "context": {
+      "core_base_revision": "4dbb3def21c5b6814b164e7ac30d2719ca2c24ef",
+      "checked_source": "/nix/store/789lvlkvcwz07rbaf8k4zk1wy1jp5yrz-source",
+      "files": [
+        {
+          "file": "examples/indexed-liveness-profile.rs",
+          "sha256": "dcfed3ccb1e1573fb889d8578f8bea0f88fc22250721cb2d82b171c6ee95d8af"
+        },
+        {
+          "file": "flake.nix",
+          "sha256": "e3b3f94fd2631a6141bdf79261945cc2d0d6eb164ebfd6b25dd7522bf2ded0ca"
+        },
+        {
+          "file": "src/packstore/compact.rs",
+          "sha256": "bdb7973481a482dbae1326aebca46dd0cd46e800ef7a563a26b7d45367ca4645"
+        },
+        {
+          "file": "src/packstore/gc_tests.rs",
+          "sha256": "fb51322e2c0f26452bcee446f32c56b3674fc09d21def2183b8a2cb94821ead8"
+        }
+      ],
+      "build": {
+        "derivations": [
+          "/nix/store/0p3y9hrxz9lc02q9jhgyczhlp2qqsfb5-amber-core-store-check-0.1.0.drv",
+          "/nix/store/qq3fy1bz31pcx9f1fr6rlj7r5x6slh23-amber-core-indexed-liveness-bench-0.1.0.drv"
+        ],
+        "exit_code": 0,
+        "elapsed": "27sec 787ms 876µs 343ns",
+        "outputs": [
+          {
+            "drvPath": "/nix/store/0p3y9hrxz9lc02q9jhgyczhlp2qqsfb5-amber-core-store-check-0.1.0.drv",
+            "outputs": {
+              "out": "/nix/store/yvlzn0k4y0g4rbffinghl472jg6gb80i-amber-core-store-check-0.1.0"
+            },
+            "startTime": 1789079470,
+            "stopTime": 1789079497
+          },
+          {
+            "drvPath": "/nix/store/qq3fy1bz31pcx9f1fr6rlj7r5x6slh23-amber-core-indexed-liveness-bench-0.1.0.drv",
+            "outputs": {
+              "out": "/nix/store/49jgi95xbw74w24fdvhbjxrvxl0yxp0a-amber-core-indexed-liveness-bench-0.1.0"
+            },
+            "startTime": 1789079470,
+            "stopTime": 1789079487
+          }
+        ],
+        "log": "/home/forge-dev-builds/90860006-23f8-4623-b51b-84f24cf097e0/build.log"
+      },
+      "tests": [
+        "amber-core-store-check> test result: ok. 465 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s"
+      ],
+      "references_before": "5e1b41e2f3865e70c6bd3474bbae3cf430db602f5efc9da4d066eea18b44b033",
+      "host_before": {
+        "load": "0.27 0.95 1.45 3/720 50528\n",
+        "cpu_pressure": "some avg10=0.00 avg60=0.03 avg300=0.09 total=94257510888\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"
+      }
+    },
+    "result": {
+      "cases": [
+        {
+          "dead_records": 27369786,
+          "live_records": 0,
+          "marked_keys": 0,
+          "preparation_seconds": 0.000671483,
+          "prime_seconds": 8.333791728,
+          "samples": [
+            {
+              "mode": "key",
+              "pair": 0,
+              "seconds": 8.261290585,
+              "system_seconds": 0.0009870000000000018,
+              "threshold": 0,
+              "user_seconds": 8.226336
+            },
+            {
+              "mode": "indexed",
+              "pair": 0,
+              "seconds": 0.023418239,
+              "system_seconds": 1.9999999999950613e-6,
+              "threshold": 0,
+              "user_seconds": 0.023317999999999728
+            },
+            {
+              "mode": "indexed",
+              "pair": 1,
+              "seconds": 0.023351241,
+              "system_seconds": 0.0008070000000000022,
+              "threshold": 0,
+              "user_seconds": 0.022415000000002294
+            },
+            {
+              "mode": "key",
+              "pair": 1,
+              "seconds": 8.25941894,
+              "system_seconds": 0.0,
+              "threshold": 0,
+              "user_seconds": 8.225817
+            },
+            {
+              "mode": "key",
+              "pair": 2,
+              "seconds": 8.258257684,
+              "system_seconds": 0.0,
+              "threshold": 0,
+              "user_seconds": 8.224217
+            },
+            {
+              "mode": "indexed",
+              "pair": 2,
+              "seconds": 0.02340322,
+              "system_seconds": 0.0,
+              "threshold": 0,
+              "user_seconds": 0.023277000000000214
+            }
+          ],
+          "threshold": 0
+        },
+        {
+          "dead_records": 24590670,
+          "live_records": 2779116,
+          "marked_keys": 2779116,
+          "preparation_seconds": 0.88666615,
+          "prime_seconds": 8.308360861,
+          "samples": [
+            {
+              "mode": "key",
+              "pair": 0,
+              "seconds": 8.264623362,
+              "system_seconds": 0.0,
+              "threshold": 26,
+              "user_seconds": 8.229357
+            },
+            {
+              "mode": "indexed",
+              "pair": 0,
+              "seconds": 7.975624173,
+              "system_seconds": 0.0,
+              "threshold": 26,
+              "user_seconds": 7.941217999999999
+            },
+            {
+              "mode": "indexed",
+              "pair": 1,
+              "seconds": 7.9703041,
+              "system_seconds": 0.0008230000000000043,
+              "threshold": 26,
+              "user_seconds": 7.936093999999997
+            },
+            {
+              "mode": "key",
+              "pair": 1,
+              "seconds": 8.279186319,
+              "system_seconds": 0.0,
+              "threshold": 26,
+              "user_seconds": 8.244715999999997
+            },
+            {
+              "mode": "key",
+              "pair": 2,
+              "seconds": 8.296063866,
+              "system_seconds": 0.0,
+              "threshold": 26,
+              "user_seconds": 8.261747
+            },
+            {
+              "mode": "indexed",
+              "pair": 2,
+              "seconds": 7.976130568,
+              "system_seconds": 0.0,
+              "threshold": 26,
+              "user_seconds": 7.942928000000009
+            }
+          ],
+          "threshold": 26
+        },
+        {
+          "dead_records": 13682212,
+          "live_records": 13687574,
+          "marked_keys": 13687574,
+          "preparation_seconds": 4.111697731,
+          "prime_seconds": 8.277149634,
+          "samples": [
+            {
+              "mode": "key",
+              "pair": 0,
+              "seconds": 8.266496777,
+              "system_seconds": 0.0,
+              "threshold": 128,
+              "user_seconds": 8.230795
+            },
+            {
+              "mode": "indexed",
+              "pair": 0,
+              "seconds": 4.555224248,
+              "system_seconds": 0.0,
+              "threshold": 128,
+              "user_seconds": 4.535750000000007
+            },
+            {
+              "mode": "indexed",
+              "pair": 1,
+              "seconds": 4.5159736729999995,
+              "system_seconds": 0.0,
+              "threshold": 128,
+              "user_seconds": 4.496710999999991
+            },
+            {
+              "mode": "key",
+              "pair": 1,
+              "seconds": 8.267739032,
+              "system_seconds": 0.0,
+              "threshold": 128,
+              "user_seconds": 8.23300300000001
+            },
+            {
+              "mode": "key",
+              "pair": 2,
+              "seconds": 8.291964738,
+              "system_seconds": 0.0,
+              "threshold": 128,
+              "user_seconds": 8.256989000000004
+            },
+            {
+              "mode": "indexed",
+              "pair": 2,
+              "seconds": 4.507967081,
+              "system_seconds": 0.0,
+              "threshold": 128,
+              "user_seconds": 4.488906999999983
+            }
+          ],
+          "threshold": 128
+        },
+        {
+          "dead_records": 2777876,
+          "live_records": 24591910,
+          "marked_keys": 24591910,
+          "preparation_seconds": 7.295221302,
+          "prime_seconds": 8.25097667,
+          "samples": [
+            {
+              "mode": "key",
+              "pair": 0,
+              "seconds": 12.506789472,
+              "system_seconds": 0.0,
+              "threshold": 230,
+              "user_seconds": 12.456605999999994
+            },
+            {
+              "mode": "indexed",
+              "pair": 0,
+              "seconds": 2.987796392,
+              "system_seconds": 0.0,
+              "threshold": 230,
+              "user_seconds": 2.9741980000000012
+            },
+            {
+              "mode": "indexed",
+              "pair": 1,
+              "seconds": 1.80817813,
+              "system_seconds": 0.0,
+              "threshold": 230,
+              "user_seconds": 1.800781999999998
+            },
+            {
+              "mode": "key",
+              "pair": 1,
+              "seconds": 9.198950836,
+              "system_seconds": 0.0,
+              "threshold": 230,
+              "user_seconds": 9.162727000000018
+            },
+            {
+              "mode": "key",
+              "pair": 2,
+              "seconds": 8.260902795,
+              "system_seconds": 0.0,
+              "threshold": 230,
+              "user_seconds": 8.225574999999992
+            },
+            {
+              "mode": "indexed",
+              "pair": 2,
+              "seconds": 1.157557837,
+              "system_seconds": 0.0,
+              "threshold": 230,
+              "user_seconds": 1.1524
+            }
+          ],
+          "threshold": 230
+        },
+        {
+          "dead_records": 0,
+          "live_records": 27369786,
+          "marked_keys": 27369786,
+          "preparation_seconds": 8.167310433,
+          "prime_seconds": 8.316963582,
+          "samples": [
+            {
+              "mode": "key",
+              "pair": 0,
+              "seconds": 8.273738915,
+              "system_seconds": 0.0,
+              "threshold": 256,
+              "user_seconds": 8.238821000000002
+            },
+            {
+              "mode": "indexed",
+              "pair": 0,
+              "seconds": 0.295585961,
+              "system_seconds": 0.0,
+              "threshold": 256,
+              "user_seconds": 0.2943610000000092
+            },
+            {
+              "mode": "indexed",
+              "pair": 1,
+              "seconds": 0.295137234,
+              "system_seconds": 0.0,
+              "threshold": 256,
+              "user_seconds": 0.29384600000000205
+            },
+            {
+              "mode": "key",
+              "pair": 1,
+              "seconds": 8.25677723,
+              "system_seconds": 0.0,
+              "threshold": 256,
+              "user_seconds": 8.22225499999999
+            },
+            {
+              "mode": "key",
+              "pair": 2,
+              "seconds": 8.25776092,
+              "system_seconds": 0.0,
+              "threshold": 256,
+              "user_seconds": 8.224083999999976
+            },
+            {
+              "mode": "indexed",
+              "pair": 2,
+              "seconds": 0.295164229,
+              "system_seconds": 0.000794000000000003,
+              "threshold": 256,
+              "user_seconds": 0.2931600000000003
+            }
+          ],
+          "threshold": 256
+        }
+      ],
+      "correctness": "passed",
+      "method": "Read-only record classification in one process. Key-tail thresholds select synthetic live fractions, not closed repository roots. One key-based warmup precedes alternating pairs for each captured mark set. Every per-segment result must match. Timers exclude opening, mark preparation, result validation, and serialization. No ingest, publication, or collection. Normal store opening and closing can recover or seal existing data.",
+      "open_seconds": 0.040095612,
+      "rounds": 3,
+      "source": "/home/zimbatm/forge-dev/retained-nixpkgs-push-01/server/objects"
+    },
+    "references_after": "5e1b41e2f3865e70c6bd3474bbae3cf430db602f5efc9da4d066eea18b44b033",
+    "terminal": "InvocationID=9eb26ddf12ce4e38ad7e7bc7552d37af\nMainPID=0\nResult=success\nExecMainStatus=0\nMemoryPeak=8667136\nCPUUsageNSec=234763403000"
+  },
+  {
+    "name": "indexed-liveness-mixed-01",
+    "context": {
+      "derivation": "/nix/store/bpk39vd3n60hxjqw0xxzvfpkjpvhvpyd-amber-core-indexed-liveness-bench-0.1.0.drv",
+      "source": "/nix/store/ggm1g94l5m30hy21v7kdjck8bsyfkk90-source",
+      "hashes": [
+        {
+          "file": "examples/indexed-liveness-profile.rs",
+          "sha256": "16e6940a39e897fd30db895904bfe97cd5617eaf7e7d65e8a70c0508d01fb49f"
+        },
+        {
+          "file": "src/packstore/compact.rs",
+          "sha256": "bdb7973481a482dbae1326aebca46dd0cd46e800ef7a563a26b7d45367ca4645"
+        },
+        {
+          "file": "src/packstore/gc_tests.rs",
+          "sha256": "fb51322e2c0f26452bcee446f32c56b3674fc09d21def2183b8a2cb94821ead8"
+        },
+        {
+          "file": "flake.nix",
+          "sha256": "e3b3f94fd2631a6141bdf79261945cc2d0d6eb164ebfd6b25dd7522bf2ded0ca"
+        }
+      ],
+      "references_before": "5e1b41e2f3865e70c6bd3474bbae3cf430db602f5efc9da4d066eea18b44b033",
+      "load": "0.09 0.67 1.40 2/706 84105\n",
+      "pressure": "some avg10=0.00 avg60=0.00 avg300=0.29 total=94267538089\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"
+    },
+    "result": {
+      "cases": [
+        {
+          "dead_records": 27369786,
+          "live_records": 0,
+          "marked_keys": 0,
+          "preparation_seconds": 0.00062806,
+          "prime_seconds": 8.375195602,
+          "samples": [
+            {
+              "mode": "key",
+              "pair": 0,
+              "seconds": 8.296807157,
+              "system_seconds": 0.0,
+              "threshold": 0,
+              "user_seconds": 8.261658999999998
+            },
+            {
+              "mode": "indexed",
+              "pair": 0,
+              "seconds": 0.023413328,
+              "system_seconds": 0.0008480000000000015,
+              "threshold": 0,
+              "user_seconds": 0.0224650000000004
+            },
+            {
+              "mode": "indexed",
+              "pair": 1,
+              "seconds": 0.023374494,
+              "system_seconds": 0.0,
+              "threshold": 0,
+              "user_seconds": 0.023243999999998266
+            },
+            {
+              "mode": "key",
+              "pair": 1,
+              "seconds": 17.295867516,
+              "system_seconds": 0.0,
+              "threshold": 0,
+              "user_seconds": 17.229359000000002
+            },
+            {
+              "mode": "key",
+              "pair": 2,
+              "seconds": 8.921714146,
+              "system_seconds": 0.001001999999999996,
+              "threshold": 0,
+              "user_seconds": 8.891753000000001
+            },
+            {
+              "mode": "indexed",
+              "pair": 2,
+              "seconds": 0.024106261,
+              "system_seconds": 0.0007650000000000018,
+              "threshold": 0,
+              "user_seconds": 0.02320599999999473
+            }
+          ],
+          "threshold": 0
+        },
+        {
+          "dead_records": 24589661,
+          "live_records": 2780125,
+          "marked_keys": 2780125,
+          "preparation_seconds": 1.051718348,
+          "prime_seconds": 8.469929754,
+          "samples": [
+            {
+              "mode": "key",
+              "pair": 0,
+              "seconds": 8.448813472,
+              "system_seconds": 0.0,
+              "threshold": 26,
+              "user_seconds": 8.413212999999999
+            },
+            {
+              "mode": "indexed",
+              "pair": 0,
+              "seconds": 8.004632005,
+              "system_seconds": 0.0,
+              "threshold": 26,
+              "user_seconds": 7.970492999999998
+            },
+            {
+              "mode": "indexed",
+              "pair": 1,
+              "seconds": 7.975221317,
+              "system_seconds": 0.0009750000000000036,
+              "threshold": 26,
+              "user_seconds": 7.939836999999997
+            },
+            {
+              "mode": "key",
+              "pair": 1,
+              "seconds": 8.443896411,
+              "system_seconds": 0.0,
+              "threshold": 26,
+              "user_seconds": 8.408557000000002
+            },
+            {
+              "mode": "key",
+              "pair": 2,
+              "seconds": 8.397062761,
+              "system_seconds": 0.0,
+              "threshold": 26,
+              "user_seconds": 8.361474000000001
+            },
+            {
+              "mode": "indexed",
+              "pair": 2,
+              "seconds": 7.956997692,
+              "system_seconds": 0.0,
+              "threshold": 26,
+              "user_seconds": 7.923229000000006
+            }
+          ],
+          "threshold": 26
+        },
+        {
+          "dead_records": 13688267,
+          "live_records": 13681519,
+          "marked_keys": 13681519,
+          "preparation_seconds": 4.49934468,
+          "prime_seconds": 8.503152257,
+          "samples": [
+            {
+              "mode": "key",
+              "pair": 0,
+              "seconds": 8.494945124000001,
+              "system_seconds": 0.0,
+              "threshold": 128,
+              "user_seconds": 8.459009999999992
+            },
+            {
+              "mode": "indexed",
+              "pair": 0,
+              "seconds": 4.8063672010000005,
+              "system_seconds": 0.0,
+              "threshold": 128,
+              "user_seconds": 4.786453000000009
+            },
+            {
+              "mode": "indexed",
+              "pair": 1,
+              "seconds": 4.7985132969999995,
+              "system_seconds": 0.0,
+              "threshold": 128,
+              "user_seconds": 4.778362999999985
+            },
+            {
+              "mode": "key",
+              "pair": 1,
+              "seconds": 8.497721143,
+              "system_seconds": 0.0,
+              "threshold": 128,
+              "user_seconds": 8.46195800000001
+            },
+            {
+              "mode": "key",
+              "pair": 2,
+              "seconds": 8.52933546,
+              "system_seconds": 0.0,
+              "threshold": 128,
+              "user_seconds": 8.493593000000004
+            },
+            {
+              "mode": "indexed",
+              "pair": 2,
+              "seconds": 4.7988440709999995,
+              "system_seconds": 0.0,
+              "threshold": 128,
+              "user_seconds": 4.7786669999999845
+            }
+          ],
+          "threshold": 128
+        },
+        {
+          "dead_records": 2782944,
+          "live_records": 24586842,
+          "marked_keys": 24586842,
+          "preparation_seconds": 7.518489031,
+          "prime_seconds": 8.343583632,
+          "samples": [
+            {
+              "mode": "key",
+              "pair": 0,
+              "seconds": 8.695401302,
+              "system_seconds": 0.0,
+              "threshold": 230,
+              "user_seconds": 8.66188600000001
+            },
+            {
+              "mode": "indexed",
+              "pair": 0,
+              "seconds": 1.54731358,
+              "system_seconds": 0.0,
+              "threshold": 230,
+              "user_seconds": 1.5405109999999809
+            },
+            {
+              "mode": "indexed",
+              "pair": 1,
+              "seconds": 2.272046226,
+              "system_seconds": 0.0,
+              "threshold": 230,
+              "user_seconds": 2.260511000000008
+            },
+            {
+              "mode": "key",
+              "pair": 1,
+              "seconds": 14.213674423,
+              "system_seconds": 9.999999999871223e-7,
+              "threshold": 230,
+              "user_seconds": 14.15091000000001
+            },
+            {
+              "mode": "key",
+              "pair": 2,
+              "seconds": 16.675432259,
+              "system_seconds": 0.0,
+              "threshold": 230,
+              "user_seconds": 16.606351000000018
+            },
+            {
+              "mode": "indexed",
+              "pair": 2,
+              "seconds": 1.335057758,
+              "system_seconds": 0.0008150000000000102,
+              "threshold": 230,
+              "user_seconds": 1.3276400000000024
+            }
+          ],
+          "threshold": 230
+        },
+        {
+          "dead_records": 0,
+          "live_records": 27369786,
+          "marked_keys": 27369786,
+          "preparation_seconds": 8.959515367,
+          "prime_seconds": 8.689743468,
+          "samples": [
+            {
+              "mode": "key",
+              "pair": 0,
+              "seconds": 16.55989801,
+              "system_seconds": 0.0,
+              "threshold": 256,
+              "user_seconds": 16.50027700000001
+            },
+            {
+              "mode": "indexed",
+              "pair": 0,
+              "seconds": 0.411583931,
+              "system_seconds": 0.0006829999999999892,
+              "threshold": 256,
+              "user_seconds": 0.40901600000000826
+            },
+            {
+              "mode": "indexed",
+              "pair": 1,
+              "seconds": 0.412444553,
+              "system_seconds": 0.0,
+              "threshold": 256,
+              "user_seconds": 0.4106649999999945
+            },
+            {
+              "mode": "key",
+              "pair": 1,
+              "seconds": 11.374243175,
+              "system_seconds": 0.0,
+              "threshold": 256,
+              "user_seconds": 11.326842000000028
+            },
+            {
+              "mode": "key",
+              "pair": 2,
+              "seconds": 13.728438306,
+              "system_seconds": 0.0008439999999999975,
+              "threshold": 256,
+              "user_seconds": 13.668487999999968
+            },
+            {
+              "mode": "indexed",
+              "pair": 2,
+              "seconds": 0.2278436,
+              "system_seconds": 0.0,
+              "threshold": 256,
+              "user_seconds": 0.2270950000000198
+            }
+          ],
+          "threshold": 256
+        }
+      ],
+      "correctness": "passed",
+      "method": "Read-only record classification in one process. Thresholds on key byte 31 group by index bucket; byte 30 mixes membership within buckets. These select synthetic live fractions, not closed repository roots. One key-based warmup precedes alternating pairs for each captured mark set. Every per-segment result must match. Timers exclude opening, mark preparation, result validation, and serialization. No ingest, publication, or collection. Normal store opening and closing can recover or seal existing data.",
+      "open_seconds": 0.03268938,
+      "rounds": 3,
+      "selection_byte": 30,
+      "source": "/home/zimbatm/forge-dev/retained-nixpkgs-push-01/server/objects"
+    },
+    "references_after": "5e1b41e2f3865e70c6bd3474bbae3cf430db602f5efc9da4d066eea18b44b033",
+    "terminal": "InvocationID=5f765e7903c249e1aab7780985317460\nMainPID=0\nResult=success\nExecMainStatus=0\nMemoryPeak=7925760\nCPUUsageNSec=274636266000"
+  }
+]

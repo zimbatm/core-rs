@@ -951,6 +951,15 @@ fn indexed_compaction_matches_key_liveness_with_active_and_grey_records() {
         store.begin_barrier();
         store.observe_keys(&[objects[3].key]);
         store.put(late.key, &late.data).unwrap();
+        assert_eq!(
+            store.liveness(|key| marks.contains(key)).unwrap(),
+            store.liveness_marked(&marks).unwrap()
+        );
+        let empty = store.new_mark_set().unwrap();
+        assert_eq!(
+            store.liveness(|_| false).unwrap(),
+            store.liveness_marked(&empty).unwrap()
+        );
         let stats = if indexed {
             store
                 .compact_marked(&marks, CompactOpts::default())
