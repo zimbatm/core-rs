@@ -116,6 +116,24 @@ impl MarkSet {
         }
     }
 
+    pub(super) fn contains_record(
+        &self,
+        segment: &SealedSegment,
+        position: usize,
+        key: Key,
+    ) -> bool {
+        if let Ok(index) = self.segs.binary_search_by_key(&segment.id, |g| g.id)
+            && std::ptr::eq(self.segs[index].as_ref(), segment)
+            && self.bits[index]
+                .get(position / 64)
+                .is_some_and(|word| word & (1 << (position % 64)) != 0)
+        {
+            return true;
+        }
+        // An older duplicate or a segment sealed after capture can still contain a live key.
+        self.contains(key)
+    }
+
     /// Returns the number of distinct keys marked so far (Go: `Marked`).
     pub fn marked(&self) -> usize {
         self.marked
@@ -216,5 +234,34 @@ impl super::SegmentSnapshot {
             marks.bits.push(bitmap.words.clone());
         }
         Ok(SealedMembership { marks })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::key::Type;
+    use tempfile::TempDir;
+
+    #[test]
+    fn indexed_mark_requires_the_captured_segment_identity() {
+        let first_dir = TempDir::new().unwrap();
+        let second_dir = TempDir::new().unwrap();
+        let first = Store::open(first_dir.path()).unwrap();
+        let second = Store::open(second_dir.path()).unwrap();
+        let a = Key::new(Type::Blob, 1, b"a");
+        let b = Key::new(Type::Blob, 1, b"b");
+        first.put(a, b"a").unwrap();
+        second.put(b, b"b").unwrap();
+        let first_snapshot = first.seal_snapshot().unwrap();
+        let second_snapshot = second.seal_snapshot().unwrap();
+        assert_eq!(
+            first_snapshot.segments[0].id,
+            second_snapshot.segments[0].id
+        );
+        let mut marks = first.new_mark_set().unwrap();
+        assert_eq!(marks.mark(a), (true, true));
+        assert!(marks.contains_record(&first_snapshot.segments[0], 0, a));
+        assert!(!marks.contains_record(&second_snapshot.segments[0], 0, b));
     }
 }

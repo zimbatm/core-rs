@@ -1,0 +1,61 @@
+{
+  "core_base_revision": "3eac71c5892aeee1443d0a877141f88736924509",
+  "checked_source": "/nix/store/a0mn9i1bzss2a2ws2yy32jwapa1fr4vq-source",
+  "files": [
+    {
+      "file": "src/gc/cycle.rs",
+      "sha256": "c394862f42733a280e6d5934dcd288b7fa7de35b0aff8cadfceab7ad0f01e597"
+    },
+    {
+      "file": "src/packstore/compact.rs",
+      "sha256": "a126819a92263a9d8c3833715b724c46cb30ccda214f0a49f930ab2bfa92fc26"
+    },
+    {
+      "file": "src/packstore/gc_tests.rs",
+      "sha256": "b3871fbae1015581cd07cf0bb94c7b9c8200f0b1957514421db290cb96e58aa0"
+    },
+    {
+      "file": "src/packstore/markset.rs",
+      "sha256": "b29fa73699046522eefe4ea0b43351d68722e4ece04573af348c1032564bb997"
+    }
+  ],
+  "tests": [
+    "amber-core-store-check> test packstore::gc_tests::indexed_compaction_matches_key_liveness_with_active_and_grey_records ... ok",
+    "amber-core-store-check> test packstore::markset::tests::indexed_mark_requires_the_captured_segment_identity ... ok",
+    "amber-core-store-check> test result: ok. 465 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s"
+  ],
+  "terminal": {
+    "unit": "forge-dev-78f371e2-dd6c-4dc7-af65-cf212405dad7.service",
+    "properties": {
+      "LoadState": "loaded",
+      "ActiveState": "active",
+      "SubState": "exited",
+      "InvocationID": "16b7906c905a492c975825ac81112d8d",
+      "MainPID": "0",
+      "Result": "success",
+      "ExecMainStatus": "0",
+      "MemoryCurrent": "[not set]",
+      "MemoryPeak": "1303314432",
+      "CPUUsageNSec": "131897258000"
+    },
+    "result": {
+      "derivations": [
+        "/nix/store/pwlkwhjyyjrg8gzsm5ji9ybm0v9b51ym-amber-core-store-check-0.1.0.drv"
+      ],
+      "exit_code": 0,
+      "elapsed": "27sec 470ms 519µs 343ns",
+      "outputs": [
+        {
+          "drvPath": "/nix/store/pwlkwhjyyjrg8gzsm5ji9ybm0v9b51ym-amber-core-store-check-0.1.0.drv",
+          "outputs": {
+            "out": "/nix/store/c3hnsan7knqaxbb05mmkcfkm71z25x78-amber-core-store-check-0.1.0"
+          },
+          "startTime": 1789078631,
+          "stopTime": 1789078657
+        }
+      ],
+      "log": "/home/forge-dev-builds/78f371e2-dd6c-4dc7-af65-cf212405dad7/build.log"
+    }
+  },
+  "scope": "Core correctness validation only; no compaction performance comparison; Forge Core pin remains unchanged"
+}

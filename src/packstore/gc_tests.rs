@@ -928,3 +928,51 @@ fn sealed_membership_rejects_invalid_layouts() {
             .contains(objects[0].key)
     );
 }
+
+#[test]
+fn indexed_compaction_matches_key_liveness_with_active_and_grey_records() {
+    let (_left_dir, left, objects) = compact_store();
+    let right_dir = TempDir::new().unwrap();
+    let right = Store::open_with(
+        right_dir.path(),
+        Options::new().segment_size(8 << 10).sync(false),
+    )
+    .unwrap();
+    for object in &objects {
+        right.put(object.key, &object.data).unwrap();
+    }
+    let late = blob_obj(b"written after liveness capture");
+    let mut expected_stats = None;
+    for (store, indexed) in [(&left, false), (&right, true)] {
+        let mut marks = store.new_mark_set().unwrap();
+        for index in [0, 4] {
+            assert_eq!(marks.mark(objects[index].key), (true, true));
+        }
+        store.begin_barrier();
+        store.observe_keys(&[objects[3].key]);
+        store.put(late.key, &late.data).unwrap();
+        let stats = if indexed {
+            store
+                .compact_marked(&marks, CompactOpts::default())
+                .unwrap()
+        } else {
+            store
+                .compact(|key| marks.contains(key), CompactOpts::default())
+                .unwrap()
+        };
+        if let Some(expected) = &expected_stats {
+            assert_eq!(&stats, expected);
+        } else {
+            expected_stats = Some(stats);
+        }
+        for (index, object) in objects.iter().enumerate() {
+            if [0, 3, 4].contains(&index) {
+                assert_eq!(store.get(object.key).unwrap(), object.data);
+            } else {
+                assert!(!store.has(object.key).unwrap());
+            }
+        }
+        assert_eq!(store.get(late.key).unwrap(), late.data);
+        assert_eq!(marks.marked(), 2);
+    }
+}

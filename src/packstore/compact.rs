@@ -112,14 +112,17 @@ fn all_entries(g: &SealedSegment) -> impl Iterator<Item = IndexEntry> + '_ {
 
 /// Classifies every index entry of one sealed segment by `live` (Go:
 /// `sealedSegment.liveness`).
-fn segment_liveness(g: &SealedSegment, live: &dyn Fn(Key) -> bool) -> SegmentLiveness {
+fn segment_liveness(
+    g: &SealedSegment,
+    live: &dyn Fn(&SealedSegment, usize, Key) -> bool,
+) -> SegmentLiveness {
     let mut info = SegmentLiveness {
         id: g.id,
         sealed: true,
         ..SegmentLiveness::default()
     };
-    for e in all_entries(g) {
-        info.add(live(e.k), e.slen);
+    for (position, e) in all_entries(g).enumerate() {
+        info.add(live(g, position, e.k), e.slen);
     }
     info
 }
@@ -172,7 +175,7 @@ impl Store {
         }
         let mut report = Vec::new();
         for g in &sh.sealed {
-            report.push(segment_liveness(g.load()?, &live));
+            report.push(segment_liveness(g.load()?, &|_, _, key| live(key)));
         }
         if let Some(a) = &sh.active {
             let mut info = SegmentLiveness {
@@ -198,6 +201,28 @@ impl Store {
     where
         L: Fn(Key) -> bool + Sync,
     {
+        self.compact_records(|_, _, key| live(key), opts)
+    }
+
+    pub(crate) fn compact_marked(
+        &self,
+        marks: &super::MarkSet,
+        opts: CompactOpts,
+    ) -> Result<CompactStats, Error> {
+        if marks.marked() == 0 {
+            return self.compact(|_| false, opts);
+        }
+        self.compact_records(
+            |segment, position, key| marks.contains_record(segment, position, key),
+            opts,
+        )
+    }
+
+    fn compact_records(
+        &self,
+        live: impl Fn(&SealedSegment, usize, Key) -> bool + Sync,
+        opts: CompactOpts,
+    ) -> Result<CompactStats, Error> {
         let CompactOpts {
             min_dead_ratio,
             horizon,
@@ -211,7 +236,9 @@ impl Store {
         // when the set is non-empty; an empty or absent set greys nothing,
         // so the unconditional wrapper is equivalent.
         let grey = self.take_grey();
-        let live = move |k: Key| grey.as_ref().is_some_and(|g| g.contains(&k)) || live(k);
+        let live = move |segment: &SealedSegment, position, key: Key| {
+            grey.as_ref().is_some_and(|g| g.contains(&key)) || live(segment, position, key)
+        };
 
         let mut stats = CompactStats::default();
         {
@@ -255,7 +282,7 @@ impl Store {
     /// and with dead bytes at or above the ratio line (Go: `selectVictims`).
     fn select_victims(
         &self,
-        live: &(impl Fn(Key) -> bool + Sync),
+        live: &(impl Fn(&SealedSegment, usize, Key) -> bool + Sync),
         horizon: Option<SystemTime>,
         min_dead_ratio: f64,
         stats: &mut CompactStats,
@@ -293,7 +320,7 @@ impl Store {
         &self,
         ap: &mut AppendState,
         victims: &[Arc<SealedSegment>],
-        live: &(impl Fn(Key) -> bool + Sync),
+        live: &(impl Fn(&SealedSegment, usize, Key) -> bool + Sync),
         pace: &mut Option<Box<dyn FnMut(usize) + Send>>,
         stats: &mut CompactStats,
     ) -> Result<(), Error> {
@@ -335,11 +362,11 @@ impl Store {
                 let tx = cands_tx; // moved in; dropping it closes the channel
                 for g in victims {
                     let body_len = g.fv.body_len;
-                    for e in all_entries(g) {
+                    for (position, e) in all_entries(g).enumerate() {
                         if pipe.canceled() {
                             return;
                         }
-                        if !live(e.k) {
+                        if !live(g, position, e.k) {
                             continue;
                         }
                         match survivor_has(e.k) {

@@ -237,7 +237,7 @@ impl Core {
             opts.pace = Some(Box::new(move |n| throttle.pace(n)));
         }
         let sweep_start = Instant::now();
-        let res = self.objects.compact(|k| live.contains(k), opts);
+        let res = self.objects.compact_marked(&live, opts);
         stats.sweep_duration = sweep_start.elapsed();
         match res {
             Ok(cs) => {
