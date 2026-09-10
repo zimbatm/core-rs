@@ -522,6 +522,10 @@ impl Store {
 }
 
 #[cfg(test)]
+#[path = "records_bench.rs"]
+mod bench;
+
+#[cfg(test)]
 mod tests {
     use super::super::{Options, testutil::blob_obj};
     use super::*;

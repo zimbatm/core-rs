@@ -72,6 +72,32 @@
             ];
             installPhase = "mkdir -p $out";
           };
+          membership-bench = pkgs.rustPlatform.buildRustPackage {
+            pname = "amber-core-membership-bench";
+            version = "0.1.0";
+            src = self;
+            cargoLock.lockFile = ./Cargo.lock;
+            cargoBuildFlags = [
+              "--lib"
+              "--tests"
+            ];
+            doCheck = false;
+            nativeBuildInputs = [ pkgs.makeWrapper ];
+            installPhase = ''
+              runHook preInstall
+              bench_count=0
+              for binary in target/${pkgs.stdenv.hostPlatform.rust.rustcTarget}/release/deps/amber_store_core-*; do
+                if [[ -f "$binary" && -x "$binary" ]]; then
+                  install -Dm755 "$binary" "$out/libexec/membership-bench"
+                  bench_count=$((bench_count + 1))
+                fi
+              done
+              test "$bench_count" -eq 1
+              makeWrapper "$out/libexec/membership-bench" "$out/bin/membership-bench" \
+                --add-flags "--ignored --exact packstore::records::bench::membership_benchmark --nocapture"
+              runHook postInstall
+            '';
+          };
           checksum-bench = pkgs.rustPlatform.buildRustPackage {
             pname = "amber-core-checksum-bench";
             version = "0.1.0";
