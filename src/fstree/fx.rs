@@ -28,6 +28,7 @@
 //! type names (`[]uint8`, `fstree.Entry.4`, …), so wrapped fstree errors
 //! compare equal to the Go implementation's strings.
 
+use std::borrow::Cow;
 use std::fmt;
 
 use super::{DirPair, Entry};
@@ -640,7 +641,7 @@ fn valid_builtin_tag(tag_num: u64, content_head: u8) -> Result<(), CborError> {
 // ---------------------------------------------------------------------------
 
 /// Unmarshals a CBOR array of byte strings (Go `[][]byte`), for FileNode.
-pub(super) fn unmarshal_byte_slices(data: &[u8]) -> Result<Vec<Vec<u8>>, CborError> {
+pub(super) fn unmarshal_byte_slices(data: &[u8]) -> Result<Vec<Cow<'_, [u8]>>, CborError> {
     wellformed(data, &DECODE_WF)?;
     let mut d = Dec::new(data);
     let (v, err) = d.parse_to_byte_slices();
@@ -1846,8 +1847,16 @@ impl<'a> Dec<'a> {
         }
     }
 
-    fn parse_to_byte_slices(&mut self) -> (Vec<Vec<u8>>, Option<CborError>) {
-        self.parse_to_slice_of("[][]uint8", |d| d.parse_to_bytes("[]uint8"))
+    fn parse_to_byte_slices(&mut self) -> (Vec<Cow<'a, [u8]>>, Option<CborError>) {
+        self.parse_to_slice_of("[][]uint8", |d| {
+            if d.next_type() == CborType::ByteString && d.next_initial_byte() & 31 != 31 {
+                let (_, _, length) = d.get_head();
+                (Cow::Borrowed(d.read(length)), None)
+            } else {
+                let (bytes, error) = d.parse_to_bytes("[]uint8");
+                (Cow::Owned(bytes), error)
+            }
+        })
     }
 
     fn parse_to_entries(&mut self) -> (Vec<Entry>, Option<CborError>) {
@@ -1862,6 +1871,47 @@ impl<'a> Dec<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn borrowed_file_children_match_owned_decoder_on_mutations() {
+        fn owned(data: &[u8]) -> Result<Vec<Vec<u8>>, CborError> {
+            wellformed(data, &DECODE_WF)?;
+            let mut d = Dec::new(data);
+            let (values, error) = d.parse_to_slice_of("[][]uint8", |d| d.parse_to_bytes("[]uint8"));
+            error.map_or(Ok(values), Err)
+        }
+        let key = crate::key::Key::new(crate::key::Type::Blob, 1, b"x");
+        let canonical = crate::fstree::encode_file_node(&[key, key]).bytes;
+        let mut mixed = vec![0x83, 0x58, 0x20];
+        mixed.extend_from_slice(key.as_bytes());
+        mixed.extend_from_slice(&[0x5f, 0x50]);
+        mixed.extend_from_slice(&key.as_bytes()[..16]);
+        mixed.push(0x50);
+        mixed.extend_from_slice(&key.as_bytes()[16..]);
+        mixed.extend_from_slice(&[0xff, 0xd8, 0x18, 0x58, 0x20]);
+        mixed.extend_from_slice(key.as_bytes());
+        for seed in [canonical, mixed] {
+            for length in 0..=seed.len() {
+                let data = &seed[..length];
+                assert_eq!(
+                    unmarshal_byte_slices(data)
+                        .map(|v| v.into_iter().map(Cow::into_owned).collect::<Vec<_>>()),
+                    owned(data)
+                );
+            }
+            for position in 0..seed.len() {
+                for byte in 0..=255 {
+                    let mut data = seed.clone();
+                    data[position] = byte;
+                    assert_eq!(
+                        unmarshal_byte_slices(&data)
+                            .map(|v| v.into_iter().map(Cow::into_owned).collect::<Vec<_>>()),
+                        owned(&data),
+                        "position {position}, byte {byte}"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn bignum_decimal_rendering() {

@@ -72,6 +72,18 @@
             ];
             installPhase = "mkdir -p $out";
           };
+          file-node-bench = pkgs.rustPlatform.buildRustPackage {
+            pname = "amber-core-file-node-bench";
+            version = "0.1.0";
+            src = self;
+            cargoLock.lockFile = ./Cargo.lock;
+            cargoBuildFlags = [
+              "--example"
+              "file-node-profile"
+            ];
+            doCheck = false;
+            installPhase = "install -Dm755 target/${pkgs.stdenv.hostPlatform.rust.rustcTarget}/release/examples/file-node-profile $out/bin/file-node-profile";
+          };
           indexed-liveness-bench = pkgs.rustPlatform.buildRustPackage {
             pname = "amber-core-indexed-liveness-bench";
             version = "0.1.0";

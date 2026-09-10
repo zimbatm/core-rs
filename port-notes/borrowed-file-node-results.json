@@ -1,0 +1,349 @@
+{
+  "context": {
+    "sources": [
+      {
+        "drv": "/nix/store/859cd7mxz4bm2npdvaa830mh608g7g1x-amber-core-file-node-bench-0.1.0.drv",
+        "source": "/nix/store/2462rdqrc8i240djizy68n7kjl4zcw7s-source",
+        "files": [
+          {
+            "file": "src/fstree/fx.rs",
+            "sha256": "40b0d4b3d7a1d150a2eb0f0415559aa3b9836a1235730970ef54f20713c5d41d"
+          },
+          {
+            "file": "examples/file-node-profile.rs",
+            "sha256": "c9f5c2a470afdcb66a693f59ff946ad8bfc067921d318e8cb47d6b738444db11"
+          },
+          {
+            "file": "flake.nix",
+            "sha256": "33d4c9d8b4beef907f7e9e375b45986587ae141d4596603d8a2255c7d401c328"
+          }
+        ]
+      },
+      {
+        "drv": "/nix/store/vdka7gw511i6p02w2xprsqdw25gpv523-amber-core-file-node-bench-0.1.0.drv",
+        "source": "/nix/store/3csmjar103hi0cdy6bdzl7z5gy1d7m87-source",
+        "files": [
+          {
+            "file": "src/fstree/fx.rs",
+            "sha256": "d94c0980bf817bc041e3ff984606482cb9dd3b3c8fe034cd5dba17b9590015bb"
+          },
+          {
+            "file": "examples/file-node-profile.rs",
+            "sha256": "c9f5c2a470afdcb66a693f59ff946ad8bfc067921d318e8cb47d6b738444db11"
+          },
+          {
+            "file": "flake.nix",
+            "sha256": "33d4c9d8b4beef907f7e9e375b45986587ae141d4596603d8a2255c7d401c328"
+          }
+        ]
+      }
+    ],
+    "references_before": "5e1b41e2f3865e70c6bd3474bbae3cf430db602f5efc9da4d066eea18b44b033",
+    "load_before": "0.90 1.97 2.43 1/714 428765\n",
+    "pressure_before": "some avg10=0.00 avg60=0.02 avg300=0.04 total=94287981025\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+    "tests": [
+      "amber-core-store-check> test result: ok. 466 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.29s"
+    ]
+  },
+  "report": {
+    "correctness": "passed",
+    "runs": [
+      {
+        "pair": 0,
+        "mode": "baseline",
+        "samples": [
+          {
+            "allocation_calls": 421810,
+            "decodes": 40960,
+            "requested_bytes": 30238000,
+            "round": 0,
+            "seconds": 0.011788886,
+            "warmup": true
+          },
+          {
+            "allocation_calls": 421810,
+            "decodes": 40960,
+            "requested_bytes": 30238000,
+            "round": 1,
+            "seconds": 0.011182898,
+            "warmup": false
+          },
+          {
+            "allocation_calls": 421810,
+            "decodes": 40960,
+            "requested_bytes": 30238000,
+            "round": 2,
+            "seconds": 0.011165766,
+            "warmup": false
+          },
+          {
+            "allocation_calls": 421810,
+            "decodes": 40960,
+            "requested_bytes": 30238000,
+            "round": 3,
+            "seconds": 0.011177949,
+            "warmup": false
+          }
+        ],
+        "manifest_digest": "000ca01869df2e9b3e17b955b01568db633bcd95b5b3abb43507e6c5f7b9a036",
+        "objects": 4096,
+        "children": 29893,
+        "bytes": 1020458
+      },
+      {
+        "pair": 0,
+        "mode": "candidate",
+        "samples": [
+          {
+            "allocation_calls": 122880,
+            "decodes": 40960,
+            "requested_bytes": 20672240,
+            "round": 0,
+            "seconds": 0.007157024,
+            "warmup": true
+          },
+          {
+            "allocation_calls": 122880,
+            "decodes": 40960,
+            "requested_bytes": 20672240,
+            "round": 1,
+            "seconds": 0.007292021,
+            "warmup": false
+          },
+          {
+            "allocation_calls": 122880,
+            "decodes": 40960,
+            "requested_bytes": 20672240,
+            "round": 2,
+            "seconds": 0.007012928,
+            "warmup": false
+          },
+          {
+            "allocation_calls": 122880,
+            "decodes": 40960,
+            "requested_bytes": 20672240,
+            "round": 3,
+            "seconds": 0.007031994,
+            "warmup": false
+          }
+        ],
+        "manifest_digest": "000ca01869df2e9b3e17b955b01568db633bcd95b5b3abb43507e6c5f7b9a036",
+        "objects": 4096,
+        "children": 29893,
+        "bytes": 1020458
+      },
+      {
+        "pair": 1,
+        "mode": "candidate",
+        "samples": [
+          {
+            "allocation_calls": 122880,
+            "decodes": 40960,
+            "requested_bytes": 20672240,
+            "round": 0,
+            "seconds": 0.006927124,
+            "warmup": true
+          },
+          {
+            "allocation_calls": 122880,
+            "decodes": 40960,
+            "requested_bytes": 20672240,
+            "round": 1,
+            "seconds": 0.006954987,
+            "warmup": false
+          },
+          {
+            "allocation_calls": 122880,
+            "decodes": 40960,
+            "requested_bytes": 20672240,
+            "round": 2,
+            "seconds": 0.006715991,
+            "warmup": false
+          },
+          {
+            "allocation_calls": 122880,
+            "decodes": 40960,
+            "requested_bytes": 20672240,
+            "round": 3,
+            "seconds": 0.00669453,
+            "warmup": false
+          }
+        ],
+        "manifest_digest": "000ca01869df2e9b3e17b955b01568db633bcd95b5b3abb43507e6c5f7b9a036",
+        "objects": 4096,
+        "children": 29893,
+        "bytes": 1020458
+      },
+      {
+        "pair": 1,
+        "mode": "baseline",
+        "samples": [
+          {
+            "allocation_calls": 421810,
+            "decodes": 40960,
+            "requested_bytes": 30238000,
+            "round": 0,
+            "seconds": 0.011108086,
+            "warmup": true
+          },
+          {
+            "allocation_calls": 421810,
+            "decodes": 40960,
+            "requested_bytes": 30238000,
+            "round": 1,
+            "seconds": 0.010724444,
+            "warmup": false
+          },
+          {
+            "allocation_calls": 421810,
+            "decodes": 40960,
+            "requested_bytes": 30238000,
+            "round": 2,
+            "seconds": 0.010716088,
+            "warmup": false
+          },
+          {
+            "allocation_calls": 421810,
+            "decodes": 40960,
+            "requested_bytes": 30238000,
+            "round": 3,
+            "seconds": 0.010713412,
+            "warmup": false
+          }
+        ],
+        "manifest_digest": "000ca01869df2e9b3e17b955b01568db633bcd95b5b3abb43507e6c5f7b9a036",
+        "objects": 4096,
+        "children": 29893,
+        "bytes": 1020458
+      },
+      {
+        "pair": 2,
+        "mode": "baseline",
+        "samples": [
+          {
+            "allocation_calls": 421810,
+            "decodes": 40960,
+            "requested_bytes": 30238000,
+            "round": 0,
+            "seconds": 0.01064366,
+            "warmup": true
+          },
+          {
+            "allocation_calls": 421810,
+            "decodes": 40960,
+            "requested_bytes": 30238000,
+            "round": 1,
+            "seconds": 0.010237794,
+            "warmup": false
+          },
+          {
+            "allocation_calls": 421810,
+            "decodes": 40960,
+            "requested_bytes": 30238000,
+            "round": 2,
+            "seconds": 0.010275176,
+            "warmup": false
+          },
+          {
+            "allocation_calls": 421810,
+            "decodes": 40960,
+            "requested_bytes": 30238000,
+            "round": 3,
+            "seconds": 0.010243535,
+            "warmup": false
+          }
+        ],
+        "manifest_digest": "000ca01869df2e9b3e17b955b01568db633bcd95b5b3abb43507e6c5f7b9a036",
+        "objects": 4096,
+        "children": 29893,
+        "bytes": 1020458
+      },
+      {
+        "pair": 2,
+        "mode": "candidate",
+        "samples": [
+          {
+            "allocation_calls": 122880,
+            "decodes": 40960,
+            "requested_bytes": 20672240,
+            "round": 0,
+            "seconds": 0.007007788,
+            "warmup": true
+          },
+          {
+            "allocation_calls": 122880,
+            "decodes": 40960,
+            "requested_bytes": 20672240,
+            "round": 1,
+            "seconds": 0.006860497,
+            "warmup": false
+          },
+          {
+            "allocation_calls": 122880,
+            "decodes": 40960,
+            "requested_bytes": 20672240,
+            "round": 2,
+            "seconds": 0.006816733,
+            "warmup": false
+          },
+          {
+            "allocation_calls": 122880,
+            "decodes": 40960,
+            "requested_bytes": 20672240,
+            "round": 3,
+            "seconds": 0.006823045,
+            "warmup": false
+          }
+        ],
+        "manifest_digest": "000ca01869df2e9b3e17b955b01568db633bcd95b5b3abb43507e6c5f7b9a036",
+        "objects": 4096,
+        "children": 29893,
+        "bytes": 1020458
+      }
+    ],
+    "references_after": "5e1b41e2f3865e70c6bd3474bbae3cf430db602f5efc9da4d066eea18b44b033"
+  },
+  "terminal": "InvocationID=88475e75d6c74937a5f25642396fd8a6\nMainPID=0\nResult=success\nExecMainStatus=0\nMemoryPeak=302964736\nCPUUsageNSec=1630744000",
+  "build": {
+    "unit": "forge-dev-00e0fd98-1361-480b-941e-180e08f7b9ff.service",
+    "properties": {
+      "LoadState": "loaded",
+      "ActiveState": "active",
+      "SubState": "exited",
+      "InvocationID": "4900129bfa1c4298abed29cf9f445cd4",
+      "MainPID": "0",
+      "Result": "success",
+      "ExecMainStatus": "0",
+      "MemoryCurrent": "[not set]",
+      "MemoryPeak": "1927266304",
+      "CPUUsageNSec": "219857015000"
+    },
+    "result": {
+      "derivations": [
+        "/nix/store/b2lvfw6mhzjw35ri97914pmzmnci59sr-amber-core-store-check-0.1.0.drv",
+        "/nix/store/vdka7gw511i6p02w2xprsqdw25gpv523-amber-core-file-node-bench-0.1.0.drv"
+      ],
+      "exit_code": 0,
+      "elapsed": "27sec 862ms 148µs 695ns",
+      "outputs": [
+        {
+          "drvPath": "/nix/store/b2lvfw6mhzjw35ri97914pmzmnci59sr-amber-core-store-check-0.1.0.drv",
+          "outputs": {
+            "out": "/nix/store/n7fvmq8y6wnn652drm2c4rgka29b05xk-amber-core-store-check-0.1.0"
+          },
+          "startTime": 1789083766,
+          "stopTime": 1789083793
+        },
+        {
+          "drvPath": "/nix/store/vdka7gw511i6p02w2xprsqdw25gpv523-amber-core-file-node-bench-0.1.0.drv",
+          "outputs": {
+            "out": "/nix/store/g6463q9z8lpqjazxynrgv56rdyqn79j7-amber-core-file-node-bench-0.1.0"
+          },
+          "startTime": 1789083766,
+          "stopTime": 1789083781
+        }
+      ],
+      "log": "/home/forge-dev-builds/00e0fd98-1361-480b-941e-180e08f7b9ff/build.log"
+    }
+  }
+}
