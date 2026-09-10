@@ -107,6 +107,144 @@ impl Store {
     }
 }
 
+fn validate_batch<'a>(
+    segments: &'a [Segment],
+    locations: &[Location],
+) -> Vec<Result<ValidatedRecord<'a>, Error>> {
+    let mut records = Vec::with_capacity(locations.len());
+    for location in locations {
+        let record = segments[location.segment].validated_record(location);
+        let failed = record.is_err();
+        records.push(record);
+        if failed {
+            break;
+        }
+    }
+    records
+}
+
+#[derive(Default)]
+struct CopyBatch {
+    bytes: Vec<u8>,
+    index: std::collections::HashMap<Key, super::ActiveLoc>,
+}
+
+impl CopyBatch {
+    fn stage(&mut self, record: &ValidatedRecord<'_>, active_offset: u64) -> u64 {
+        let offset = active_offset + self.bytes.len() as u64;
+        self.index.insert(
+            record.key,
+            super::ActiveLoc {
+                off: offset,
+                flags: record.bytes[33],
+                ulen: super::be_u32(&record.bytes, 34),
+                slen: super::be_u32(&record.bytes, 38),
+            },
+        );
+        self.bytes.extend_from_slice(&record.bytes);
+        offset + record.bytes.len() as u64
+    }
+}
+
+impl Store {
+    fn flush_copy_batch(
+        &self,
+        append: &mut super::AppendState,
+        batch: &mut CopyBatch,
+    ) -> Result<(), Error> {
+        self.flush_copy_batch_with(append, batch, |file, bytes, offset| {
+            file.write_all_at(bytes, offset)
+        })
+    }
+
+    fn flush_copy_batch_with(
+        &self,
+        append: &mut super::AppendState,
+        batch: &mut CopyBatch,
+        write: impl FnOnce(&std::fs::File, &[u8], u64) -> std::io::Result<()>,
+    ) -> Result<(), Error> {
+        if batch.bytes.is_empty() {
+            return Ok(());
+        }
+        let active = append
+            .active
+            .as_mut()
+            .expect("buffered records have an active segment");
+        if let Err(error) = write(&active.seg.f, &batch.bytes, active.size) {
+            // A partial batch can contain complete, unindexed records. Reopen must recover it
+            // before another writer can append over that prefix.
+            self.set_failed(&error);
+            return Err(error.into());
+        }
+        unpoison(active.seg.index.write()).extend(batch.index.drain());
+        active.size += batch.bytes.len() as u64;
+        batch.bytes.clear();
+        Ok(())
+    }
+
+    fn put_validated_records(
+        &self,
+        records: Vec<Result<ValidatedRecord<'_>, Error>>,
+        batch: &mut CopyBatch,
+    ) -> Result<(), Error> {
+        let mut append = self.append_lock();
+        {
+            let shared = unpoison(self.shared.read());
+            if shared.closed {
+                return Err(Error::Closed);
+            }
+            if let Some(message) = &shared.failed {
+                return Err(Error::Failed(message.clone()));
+            }
+        }
+        for result in records {
+            let record = match result {
+                Ok(record) => record,
+                Err(error) => {
+                    self.flush_copy_batch(&mut append, batch)?;
+                    return Err(error);
+                }
+            };
+            self.observe(record.key);
+            if batch.index.contains_key(&record.key) {
+                continue;
+            }
+            match self.has(record.key) {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(error) => {
+                    self.flush_copy_batch(&mut append, batch)?;
+                    return Err(error);
+                }
+            }
+            // Oversized records already amortize a syscall; avoid an extra large allocation.
+            if record.bytes.len() >= 1024 * 1024 {
+                self.flush_copy_batch(&mut append, batch)?;
+                self.append_locked(&mut append, record.key, &record.bytes, false)?;
+                continue;
+            }
+            if append.active.is_none() {
+                self.create_active(&mut append)?;
+            }
+            let end = batch.stage(
+                &record,
+                append.active.as_ref().expect("created active segment").size,
+            );
+            let rotate = end >= self.cfg.segment_size;
+            if rotate || batch.bytes.len() >= 1024 * 1024 {
+                self.flush_copy_batch(&mut append, batch)?;
+            }
+            if rotate {
+                if let Err(error) = self.seal_active(&mut append) {
+                    self.set_failed(&error);
+                    return Err(error);
+                }
+            }
+        }
+        self.flush_copy_batch(&mut append, batch)
+    }
+}
+
 impl RecordView {
     pub fn get_record(&self, key: Key) -> Result<Vec<u8>, Error> {
         let location = self.locations.get(&key).ok_or(Error::NotFound)?;
@@ -186,22 +324,10 @@ impl Records {
         }
         let workers = workers.max(1).min(batches.len());
         if workers <= 1 {
-            let mut buffer = Vec::new();
-            for location in locations {
-                let bytes = match &self.segments[location.segment] {
-                    Segment::Active(segment) => {
-                        buffer.resize(REC_HEADER_SIZE + location.stored_length as usize, 0);
-                        segment.f.read_exact_at(&mut buffer, location.offset)?;
-                        &buffer[..]
-                    }
-                    Segment::Sealed(segment) => {
-                        segment.record_bytes_at(location.offset, location.stored_length)?
-                    }
-                };
-                destination.put_validated_record(ValidatedRecord::new(
-                    location.key,
-                    std::borrow::Cow::Borrowed(bytes),
-                )?)?;
+            let mut output = CopyBatch::default();
+            for batch in batches {
+                destination
+                    .put_validated_records(validate_batch(&self.segments, batch), &mut output)?;
             }
             return Ok(());
         }
@@ -214,16 +340,8 @@ impl Records {
                 let segments = &self.segments;
                 scope.spawn(move || {
                     for batch in batches.iter().skip(worker).step_by(workers) {
-                        let mut records = Vec::with_capacity(batch.len());
-                        let mut failed = false;
-                        for location in *batch {
-                            let record = segments[location.segment].validated_record(location);
-                            failed = record.is_err();
-                            records.push(record);
-                            if failed {
-                                break;
-                            }
-                        }
+                        let records = validate_batch(segments, batch);
+                        let failed = records.last().is_some_and(Result::is_err);
                         if sender.send(records).is_err() || failed {
                             break;
                         }
@@ -232,13 +350,12 @@ impl Records {
             }
             // Rendezvous channels bound validation ahead of the serial writer.
             // Dropping every receiver on error also releases blocked workers.
+            let mut output = CopyBatch::default();
             for index in 0..batches.len() {
                 let records = receivers[index % workers]
                     .recv()
                     .expect("record validator panicked");
-                for record in records {
-                    destination.put_validated_record(record?)?;
-                }
+                destination.put_validated_records(records, &mut output)?;
             }
             Ok(())
         })
@@ -431,6 +548,96 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert_eq!(records, vec![(key, newest.clone()), (key, newest)]);
+    }
+
+    #[test]
+    fn batched_copy_matches_record_writes_and_observes_dedup() {
+        use super::super::testutil::incompressible;
+        let source_dir = TempDir::new().unwrap();
+        let source = Store::open(source_dir.path()).unwrap();
+        let mut keys = populate(&source);
+        let large = blob_obj(&incompressible(1024 * 1024 + 17));
+        source.put_unflushed(large.key, &large.data).unwrap();
+        keys.push(large.key);
+        keys.push(keys[17]);
+        let reference_dir = TempDir::new().unwrap();
+        let options = Options::default().segment_size(8192);
+        let reference = Store::open_with(reference_dir.path(), options).unwrap();
+        reference
+            .put_record_unflushed(keys[17], &source.get_record(keys[17]).unwrap())
+            .unwrap();
+        for record in source.records_in_order(keys.clone()).unwrap() {
+            let (key, bytes) = record.unwrap();
+            reference.put_record_unflushed(key, &bytes).unwrap();
+        }
+        let layout = |store: &Store| {
+            store
+                .segments()
+                .unwrap()
+                .into_iter()
+                .map(|segment| (segment.body, segment.keys))
+                .collect::<Vec<_>>()
+        };
+        for workers in [1, 3] {
+            let target_dir = TempDir::new().unwrap();
+            let target = Store::open_with(target_dir.path(), options).unwrap();
+            target
+                .put_record_unflushed(keys[17], &source.get_record(keys[17]).unwrap())
+                .unwrap();
+            target.begin_barrier();
+            source
+                .records_in_order(keys.clone())
+                .unwrap()
+                .copy_with_workers(&target, workers)
+                .unwrap();
+            assert_eq!(target.take_grey().unwrap(), keys.iter().copied().collect());
+            assert_eq!(layout(&target), layout(&reference));
+            target.sync().unwrap();
+            target.close().unwrap();
+            let target = Store::open(target_dir.path()).unwrap();
+            for key in &keys {
+                assert_eq!(
+                    target.get_record(*key).unwrap(),
+                    reference.get_record(*key).unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn partial_batch_write_requires_reopen_before_more_writes() {
+        use crate::amberpack::encode_record;
+        let directory = TempDir::new().unwrap();
+        let store = Store::open(directory.path()).unwrap();
+        let first = blob_obj(b"complete first record");
+        let second = blob_obj(b"unfinished second record");
+        let first_bytes = encode_record(first.key, &first.data).unwrap();
+        let second_bytes = encode_record(second.key, &second.data).unwrap();
+        let mut batch = CopyBatch::default();
+        let mut append = store.append_lock();
+        store.create_active(&mut append).unwrap();
+        let offset = append.active.as_ref().unwrap().size;
+        for (key, bytes) in [(first.key, &first_bytes), (second.key, &second_bytes)] {
+            let record = ValidatedRecord::new(key, std::borrow::Cow::Borrowed(bytes)).unwrap();
+            batch.stage(&record, offset);
+        }
+        let result = store.flush_copy_batch_with(&mut append, &mut batch, |file, bytes, offset| {
+            file.write_all_at(&bytes[..first_bytes.len() + 5], offset)?;
+            Err(std::io::Error::other("injected partial write"))
+        });
+        assert!(result.is_err());
+        assert!(!store.has(first.key).unwrap());
+        drop(append);
+        assert!(matches!(
+            store.put_unflushed(second.key, &second.data),
+            Err(Error::Failed(_))
+        ));
+        let _ = store.close();
+        drop(store);
+        let recovered = Store::open(directory.path()).unwrap();
+        assert_eq!(recovered.get(first.key).unwrap(), first.data);
+        assert!(matches!(recovered.get(second.key), Err(Error::NotFound)));
+        recovered.put_unflushed(second.key, &second.data).unwrap();
     }
 
     #[test]
