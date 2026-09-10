@@ -2251,3 +2251,42 @@ fn get_many_preserves_newest_copy_corruption_semantics() {
         }
     }
 }
+
+#[test]
+fn pending_opening_owns_directory_and_transfers_lock() {
+    let dir = TempDir::new().unwrap();
+    let opening = Store::begin_open(dir.path(), Options::default()).unwrap();
+    assert!(Store::open(dir.path()).is_err());
+    let store = thread::spawn(move || opening.finish(&Default::default()).unwrap())
+        .join()
+        .unwrap();
+    assert!(Store::open(dir.path()).is_err());
+    let object = test_objects(1).remove(0);
+    store.put(object.key, &object.data).unwrap();
+    store.close().unwrap();
+    let reopened = Store::open(dir.path()).unwrap();
+    assert_eq!(reopened.get(object.key).unwrap(), object.data);
+    reopened.close().unwrap();
+}
+
+#[test]
+fn abandoned_opening_releases_directory() {
+    let dir = TempDir::new().unwrap();
+    let opening = Store::begin_open(dir.path(), Options::default()).unwrap();
+    assert!(Store::begin_open(dir.path(), Options::default()).is_err());
+    drop(opening);
+    Store::open(dir.path()).unwrap().close().unwrap();
+}
+
+#[test]
+fn failed_opening_releases_directory_after_deferred_validation() {
+    let dir = TempDir::new().unwrap();
+    let damaged = dir.path().join("0000000000000001.seg");
+    fs::write(&damaged, b"invalid segment").unwrap();
+    let opening = Store::begin_open(dir.path(), Options::default()).unwrap();
+    assert_eq!(fs::read(&damaged).unwrap(), b"invalid segment");
+    assert!(opening.finish(&Default::default()).is_err());
+    let retry = Store::begin_open(dir.path(), Options::default()).unwrap();
+    assert_eq!(fs::read(&damaged).unwrap(), b"invalid segment");
+    drop(retry);
+}

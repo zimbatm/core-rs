@@ -347,6 +347,23 @@ fn parse_segment_id(name: &[u8], suffix: &str) -> Result<u64, Error> {
     u64::from_str_radix(hex, 16).map_err(|_| bad())
 }
 
+/// Owns the exclusive directory lock before segment validation and recovery.
+/// Dropping an unfinished opening releases the lock without loading segments.
+pub struct StoreOpening {
+    dir: PathBuf,
+    dir_f: File,
+    cfg: Options,
+}
+
+impl StoreOpening {
+    /// Consumes the opening and transfers its lock to the completed store.
+    /// An error releases the lock. Index proofs have the same contract as
+    /// Store::open_with_validated_indexes.
+    pub fn finish(self, indexes: &BTreeMap<u64, ValidatedIndexDigest>) -> Result<Store, Error> {
+        Store::load(self.dir, self.dir_f, self.cfg, indexes)
+    }
+}
+
 impl Store {
     /// Opens (creating if necessary) a store rooted at `dir` with the default
     /// [`Options`]. Only one `Store` may have a given dir open at a time
@@ -374,6 +391,12 @@ impl Store {
         cfg: Options,
         indexes: &BTreeMap<u64, ValidatedIndexDigest>,
     ) -> Result<Store, Error> {
+        Self::begin_open(dir, cfg)?.finish(indexes)
+    }
+
+    /// Acquires directory ownership without validating or recovering segments.
+    /// The returned handle is consumed by StoreOpening::finish.
+    pub fn begin_open(dir: impl AsRef<Path>, cfg: Options) -> Result<StoreOpening, Error> {
         let dir = dir.as_ref().to_path_buf();
         fs::create_dir_all(&dir)
             .map_err(|e| Error::Other(format!("packstore: creating {}: {e}", dir.display())))?;
@@ -387,7 +410,7 @@ impl Store {
                 dir.display()
             )));
         }
-        Store::load(dir, dir_f, cfg, indexes)
+        Ok(StoreOpening { dir, dir_f, cfg })
     }
 
     /// Scans the directory: sealed segments are opened and validated, the
