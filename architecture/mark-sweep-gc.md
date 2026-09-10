@@ -105,3 +105,32 @@ payloads while copying and batches its fsyncs at the end.
 
 A store previously run under simple-gc opens cleanly: closure files are
 derived data and are deleted at collector open.
+
+## Scoped reference pins
+
+The Rust API provides `Collector::pin_ref(name)`.
+It reads one current reference and registers the parsed root under the reference lock.
+The returned `PinnedRef` keeps the exact record bytes and root together.
+Its fields are private, and its lifetime cannot exceed the collector's lifetime.
+
+Reference replacement or deletion does not release an existing pin.
+Multiple pins of the same root release independently.
+Dropping the final handle removes the extra root from subsequent collection snapshots.
+A cycle that already captured the root can retain it until a later cycle.
+
+Acquisition does not traverse the graph, read object payloads, or hold the reference lock for the handle's lifetime.
+Collection includes pinned roots in its ordinary mark walk.
+The existing grace period, victim selection, and payload verification rules remain unchanged.
+
+The reference lock prevents acquisition from crossing a root snapshot or sweep.
+During marking, a captured reference root either belonged to the initial snapshot or was published through the existing write barrier.
+Thus, acquisition during marking needs no second completeness walk.
+All publishers must follow the existing `prepare_ref` and commit contract.
+
+The caller must authenticate the captured reference before trusting its contents.
+A pin protects against this collector's sweeps.
+It does not survive process exit or protect against explicit wipe, direct pack removal, or another collector instance.
+It is not a completeness certificate and cannot authorize skipping validation by itself.
+
+Tests retain roots through replacement and deletion, release duplicate pins independently, and acquire a late pin during marking.
+The late-pin test deletes its source reference before sweeping and checks another collection cycle while the handle remains live.

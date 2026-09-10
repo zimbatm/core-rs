@@ -21,7 +21,7 @@ mod status;
 #[cfg(test)]
 mod tests;
 
-pub use collector::{Collector, PreparedRef};
+pub use collector::{Collector, PinnedRef, PreparedRef};
 pub use cycle::CycleStats;
 pub use status::{PackStatus, Status};
 

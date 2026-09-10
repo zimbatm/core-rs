@@ -1,6 +1,7 @@
 //! The collector: lifecycle, the reference hooks, and the mark walk (Go:
 //! `gc/collector.go`).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, mpsc};
@@ -81,6 +82,7 @@ pub(super) struct Core {
     /// Between the two a PUT proceeds — its walked closure joins the write
     /// barrier's grey set, so the sweep keeps it.
     pub(super) ref_lock: RwLock<()>,
+    pins: Mutex<HashMap<Key, usize>>,
 
     /// Guards [`MuState`] (Go: `mu`).
     pub(super) mu: Mutex<MuState>,
@@ -149,6 +151,7 @@ impl Collector {
             dir,
             opts,
             ref_lock: RwLock::new(()),
+            pins: Mutex::new(HashMap::new()),
             mu: Mutex::new(MuState {
                 last: None,
                 last_err: None,
@@ -218,10 +221,42 @@ impl Collector {
         self.core.prepare_ref(root)
     }
 
+    /// Pins the current record and root against this collector's sweeps.
+    ///
+    /// Acquisition reads one reference and registers its root under the
+    /// reference lock. It performs no completeness walk or payload read.
+    /// Published roots must follow the `prepare_ref`/commit contract.
+    /// Reference replacement or deletion does not invalidate the pin.
+    ///
+    /// The caller must authenticate the returned record before trusting it.
+    /// A pin is process-local and protects against collection, not explicit
+    /// store wipe, direct pack removal, or another collector over these stores.
+    pub fn pin_ref(&self, name: &str) -> Result<PinnedRef<'_>, Error> {
+        let _guard = read_lock(&self.core.ref_lock);
+        let data = self.core.refs.get(name).map_err(Error::Refs)?;
+        let decoded = Reference::decode(&data).map_err(|source| Error::Reference {
+            name: name.to_owned(),
+            source: Box::new(source),
+        })?;
+        let root = Key::parse(&decoded.key).map_err(|source| Error::Reference {
+            name: name.to_owned(),
+            source: Box::new(source),
+        })?;
+        *lock(&self.core.pins).entry(root).or_default() += 1;
+        Ok(PinnedRef {
+            core: &self.core,
+            root,
+            record: refstore::Record {
+                name: name.to_owned(),
+                data,
+            },
+        })
+    }
+
     /// Records that one reference naming `root` was deleted or overwritten.
-    /// The mark-and-sweep collector keeps no per-root state, so this is a
-    /// no-op: the next cycle simply no longer marks from the root (Go:
-    /// `ReleaseRef`; call sites keep it for protocol parity).
+    /// Reference release needs no bookkeeping: the next cycle reads the
+    /// current references. Independent PinnedRef handles can still retain
+    /// this root (Go: `ReleaseRef`; retained for protocol parity).
     pub fn release_ref(&self, root: Key) -> Result<(), Error> {
         let _ = root;
         Ok(())
@@ -244,6 +279,38 @@ impl Drop for Collector {
     /// explicit [`Collector::close`] remains the contract.
     fn drop(&mut self) {
         let _ = self.close();
+    }
+}
+
+/// A captured reference whose root remains live until this handle is dropped.
+/// The handle borrows its collector and cannot outlive it.
+#[must_use = "keep the handle alive while using its retained root"]
+pub struct PinnedRef<'c> {
+    core: &'c Core,
+    root: Key,
+    record: refstore::Record,
+}
+
+impl PinnedRef<'_> {
+    /// The root parsed from the captured record.
+    pub fn root(&self) -> Key {
+        self.root
+    }
+
+    /// The exact captured bytes, including any signature.
+    pub fn record(&self) -> &refstore::Record {
+        &self.record
+    }
+}
+
+impl Drop for PinnedRef<'_> {
+    fn drop(&mut self) {
+        let mut pins = lock(&self.core.pins);
+        let count = pins.get_mut(&self.root).expect("registered reference pin");
+        *count -= 1;
+        if *count == 0 {
+            pins.remove(&self.root);
+        }
     }
 }
 
@@ -308,6 +375,7 @@ impl Core {
             })?;
             roots.push(root);
         }
+        roots.extend(lock(&self.pins).keys().copied());
         Ok(roots)
     }
 

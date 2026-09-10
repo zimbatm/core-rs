@@ -634,3 +634,91 @@ fn wipe_waits_for_running_cycle_before_reset() {
     let hook = lock(&c.core.mu).mid_mark.take();
     drop(hook);
 }
+
+#[test]
+fn reference_pins_survive_replacement_and_release_independently() {
+    let ts = new_test_store(4 << 10);
+    let c = open_collector(&ts, Options::default());
+    let (old, keys) = store_tree(&ts.objects, "pinned-old", 40);
+    let (new, _) = store_tree(&ts.objects, "pinned-new", 40);
+    put_test_ref(&c, &ts.refs, "main", old);
+    let record = ts.refs.get("main").unwrap();
+    let first = c.pin_ref("main").unwrap();
+    let second = c.pin_ref("main").unwrap();
+    assert_eq!(first.root(), old);
+    assert_eq!(first.record().name, "main");
+    assert_eq!(first.record().data, record);
+    put_test_ref(&c, &ts.refs, "main", new);
+    drop(first);
+    backdate_packs(&ts);
+    c.run(0.0).unwrap();
+    for key in &keys {
+        ts.objects.get(*key).unwrap();
+    }
+    rm_test_ref(&c, &ts.refs, "main", new);
+    backdate_packs(&ts);
+    c.run(0.0).unwrap();
+    for key in &keys {
+        ts.objects.get(*key).unwrap();
+    }
+    drop(second);
+    backdate_packs(&ts);
+    c.run(0.0).unwrap();
+    assert!(keys.iter().any(|key| ts.objects.get(*key).is_err()));
+}
+
+#[test]
+fn reference_pin_acquired_during_mark_keeps_deleted_late_reference() {
+    use std::sync::Barrier;
+    let ts = new_test_store(4 << 10);
+    let c = open_collector(&ts, Options::default());
+    let (late, keys) = store_tree(&ts.objects, "pin-late", 40);
+    let (_, dead) = store_tree(&ts.objects, "pin-dead", 40);
+    backdate_packs(&ts);
+    let marked = Arc::new(Barrier::new(2));
+    let resume = Arc::new(Barrier::new(2));
+    let hook_marked = Arc::clone(&marked);
+    let hook_resume = Arc::clone(&resume);
+    lock(&c.core.mu).mid_mark = Some(Arc::new(move || {
+        hook_marked.wait();
+        hook_resume.wait();
+    }));
+    std::thread::scope(|scope| {
+        let cycle = scope.spawn(|| c.run(0.0));
+        marked.wait();
+        put_test_ref(&c, &ts.refs, "late", late);
+        let pin = c.pin_ref("late").unwrap();
+        rm_test_ref(&c, &ts.refs, "late", late);
+        resume.wait();
+        cycle.join().unwrap().unwrap();
+        lock(&c.core.mu).mid_mark = None;
+        for key in &keys {
+            ts.objects.get(*key).unwrap();
+        }
+        assert!(dead.iter().any(|key| ts.objects.get(*key).is_err()));
+        backdate_packs(&ts);
+        c.run(0.0).unwrap();
+        for key in &keys {
+            ts.objects.get(*key).unwrap();
+        }
+        drop(pin);
+    });
+    backdate_packs(&ts);
+    c.run(0.0).unwrap();
+    assert!(keys.iter().any(|key| ts.objects.get(*key).is_err()));
+}
+
+#[test]
+fn reference_pin_rejects_missing_and_malformed_records() {
+    let ts = new_test_store(4 << 10);
+    let c = open_collector(&ts, Options::default());
+    assert!(matches!(c.pin_ref("missing"), Err(super::Error::Refs(error)) if error.is_not_found()));
+    ts.refs.put("bad", b"invalid CBOR").unwrap();
+    assert!(matches!(
+        c.pin_ref("bad"),
+        Err(super::Error::Reference { .. })
+    ));
+    assert!(c.core.roots().is_err());
+    ts.refs.delete("bad").unwrap();
+    assert!(c.core.roots().unwrap().is_empty());
+}
