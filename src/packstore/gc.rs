@@ -10,9 +10,9 @@ use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
 use crate::amberpack::{REC_HEADER_SIZE, parse_record};
-use crate::key::{self, Key};
+use crate::key::Key;
 
-use super::footer::{INDEX_ENTRY_SIZE, SealedSegment};
+use super::footer::SealedSegment;
 use super::{Error, MAGIC_HEADER, Store, corrupt, unpoison};
 
 /// In-flight exported-write starts (Go: the `writes map[*writeToken]time.Time`
@@ -131,15 +131,8 @@ impl Store {
     /// `ScanIndex`).
     pub fn scan_index(&self, id: u64, mut f: impl FnMut(Key, u64, u32)) -> Result<(), Error> {
         let seg = self.pin_segment(id)?;
-        let fv = &seg.fv;
-        let entries = &seg.mm[fv.entries_off..fv.entries_off + fv.entries_len];
-        for row in entries.as_chunks::<INDEX_ENTRY_SIZE>().0 {
-            let mut kb = [0u8; key::SIZE];
-            kb.copy_from_slice(&row[..key::SIZE]);
-            let off = u64::from_be_bytes([
-                row[32], row[33], row[34], row[35], row[36], row[37], row[38], row[39],
-            ]);
-            f(Key(kb), off, super::be_u32(row, 40));
+        for entry in seg.index_entries() {
+            f(entry.k, entry.off, entry.slen);
         }
         Ok(())
     }

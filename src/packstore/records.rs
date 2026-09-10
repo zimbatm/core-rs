@@ -285,32 +285,67 @@ impl Store {
             .active
             .as_ref()
             .map(|segment| unpoison(segment.index.read()));
-        let keys = keys.into_iter();
-        let mut locations = Vec::with_capacity(keys.size_hint().0);
+        let mut locations = Vec::with_capacity(keys.len());
+        let mut pending = std::collections::HashMap::<Key, usize>::with_capacity(keys.len());
         for key in keys {
-            let locate = || {
-                if let Some(location) = active.as_ref().and_then(|index| index.get(&key)) {
-                    return Ok(Location {
-                        key,
-                        segment: shared.sealed.len(),
-                        offset: location.off,
-                        stored_length: location.slen,
-                    });
+            *pending.entry(key).or_default() += 1;
+        }
+        let mut record = |key, count, segment, offset, stored_length| {
+            locations.extend((0..count).map(|_| Location {
+                key,
+                segment,
+                offset,
+                stored_length,
+            }));
+        };
+        if let Some(active) = &active {
+            pending.retain(|key, count| {
+                if let Some(location) = active.get(key) {
+                    record(
+                        *key,
+                        *count,
+                        shared.sealed.len(),
+                        location.off,
+                        location.slen,
+                    );
+                    false
+                } else {
+                    true
                 }
-                for (index, segment) in shared.sealed.iter().enumerate().rev() {
-                    if let Some((offset, stored_length)) = segment.load()?.locate_record(key) {
-                        return Ok(Location {
-                            key,
-                            segment: index,
-                            offset,
-                            stored_length,
-                        });
+            });
+        }
+        for (index, segment) in shared.sealed.iter().enumerate().rev() {
+            if pending.is_empty() {
+                break;
+            }
+            let segment = segment.load()?;
+            let entries = segment.index_entries();
+            if pending.len() >= entries.len() {
+                for entry in entries {
+                    if let Some(count) = pending.remove(&entry.k) {
+                        record(entry.k, count, index, entry.off, entry.slen);
+                    }
+                    if pending.is_empty() {
+                        break;
                     }
                 }
-                Err(Error::NotFound)
-            };
-            locations.push(locate()?);
+            } else {
+                // HashMap iteration visits capacity; discard empty buckets before sparse lookup.
+                pending.shrink_to_fit();
+                pending.retain(|key, count| {
+                    if let Some((offset, stored_length)) = segment.locate_record(*key) {
+                        record(*key, *count, index, offset, stored_length);
+                        false
+                    } else {
+                        true
+                    }
+                });
+            }
         }
+        if !pending.is_empty() {
+            return Err(Error::NotFound);
+        }
+        drop(pending);
         locations.sort_unstable_by_key(|location| (location.segment, location.offset));
         let mut segments = Vec::new();
         let mut previous = None;
@@ -353,6 +388,49 @@ mod tests {
                 object.key
             })
             .collect()
+    }
+
+    #[test]
+    fn bulk_lookup_preserves_newest_records_for_dense_and_sparse_requests() {
+        use super::super::testutil::write_sealed_file;
+        let objects: Vec<_> = (0..4u8).map(|n| blob_obj(&[n; 32])).collect();
+        let (directory, first, entries) = write_sealed_file(&objects);
+        let second = directory.path().join("0000000000000002.seg");
+        let mut bytes = std::fs::read(&first).unwrap();
+        bytes[entries[0].off as usize + REC_HEADER_SIZE] ^= 1;
+        std::fs::write(&second, bytes).unwrap();
+        let store = Store::open(directory.path()).unwrap();
+        for mut keys in [
+            objects.iter().map(|object| object.key).collect::<Vec<_>>(),
+            vec![objects[0].key],
+        ] {
+            keys.extend_from_within(..);
+            let mut expected: Vec<_> = keys
+                .iter()
+                .map(|key| (*key, store.get_record(*key).unwrap()))
+                .collect();
+            expected.sort_unstable_by_key(|(key, _)| *key);
+            let mut actual = store
+                .records_in_order(keys)
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            actual.sort_unstable_by_key(|(key, _)| *key);
+            assert_eq!(actual, expected);
+        }
+        let mut keys: Vec<_> = objects.iter().map(|object| object.key).collect();
+        keys.push(blob_obj(b"missing").key);
+        assert!(matches!(store.records_in_order(keys), Err(Error::NotFound)));
+        let key = objects[0].key;
+        let mut newest = store.get_record(key).unwrap();
+        newest[REC_HEADER_SIZE] ^= 2;
+        store.append(key, &newest, false).unwrap();
+        let records = store
+            .records_in_order(vec![key, key])
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(records, vec![(key, newest.clone()), (key, newest)]);
     }
 
     #[test]

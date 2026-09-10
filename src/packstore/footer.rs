@@ -650,6 +650,18 @@ impl SealedSegment {
         Ok(&self.mm[start..end])
     }
 
+    pub(crate) fn index_entries(&self) -> impl ExactSizeIterator<Item = IndexEntry> + '_ {
+        self.mm[self.fv.entries_off..self.fv.entries_off + self.fv.entries_len]
+            .as_chunks::<INDEX_ENTRY_SIZE>()
+            .0
+            .iter()
+            .map(|row| IndexEntry {
+                k: Key(row[..key::SIZE].try_into().expect("fixed index key")),
+                off: u64::from_be_bytes(row[32..40].try_into().expect("fixed index offset")),
+                slen: be_u32(row, 40),
+            })
+    }
+
     pub(crate) fn locate_record(&self, k: Key) -> Option<(u64, u32)> {
         if !self.fv.filter_contains(&self.mm, filter_key(k)) {
             return None;
