@@ -22,7 +22,7 @@ mod status;
 mod tests;
 
 pub use collector::{Collector, PinnedRef, PreparedRef};
-pub use cycle::CycleStats;
+pub use cycle::{CycleStats, VerifiedCollection};
 pub use status::{PackStatus, Status};
 
 use std::path::{Path, PathBuf};
@@ -133,6 +133,9 @@ pub enum Error {
         /// The absent object's key.
         key: Key,
     },
+    /// A verified mark read interior bytes that do not match their content key.
+    #[error("gc: interior object checksum mismatch for {key}")]
+    InvalidInterior { key: Key },
     /// A reference record failed to decode or parse, or its tree walk failed
     /// in [`Collector::why`] (Go: `"gc: reference %q: %w"`).
     #[error("gc: reference {name:?}: {source}")]

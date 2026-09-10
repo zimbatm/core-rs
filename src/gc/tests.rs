@@ -722,3 +722,98 @@ fn reference_pin_rejects_missing_and_malformed_records() {
     ts.refs.delete("bad").unwrap();
     assert!(c.core.roots().unwrap().is_empty());
 }
+
+#[test]
+fn verified_collection_excludes_unpublished_barrier_objects() {
+    use std::collections::HashSet;
+    let ts = new_test_store(4 << 10);
+    let c = open_collector(&ts, Options::default());
+    let (root, keys) = store_tree(&ts.objects, "verified-keep", 40);
+    store_tree(&ts.objects, "verified-dead", 40);
+    put_test_ref(&c, &ts.refs, "main", root);
+    backdate_packs(&ts);
+    let absent = encode_blob(b"unpublished missing child");
+    let unpublished = encode_file_node(&[absent.key]);
+    let unpublished_key = unpublished.key;
+    let objects = Arc::clone(&ts.objects);
+    lock(&c.core.mu).mid_mark = Some(Arc::new(move || {
+        objects.put(unpublished.key, &unpublished.bytes).unwrap();
+    }));
+    let captured = c.run_verified(0.0).unwrap();
+    lock(&c.core.mu).mid_mark = None;
+    assert_eq!(captured.roots(), &[root]);
+    assert_eq!(captured.stats().marked, keys.len());
+    assert_eq!(captured.keys().len(), keys.len());
+    assert_eq!(
+        captured.keys().iter().copied().collect::<HashSet<_>>(),
+        keys.into_iter().collect::<HashSet<_>>()
+    );
+    ts.objects.get(unpublished_key).unwrap();
+    assert!(!captured.keys().contains(&unpublished_key));
+    assert!(!captured.keys().contains(&absent.key));
+}
+
+#[test]
+fn verified_collection_pins_survive_reference_removal_and_release_independently() {
+    let ts = new_test_store(4 << 10);
+    let c = open_collector(&ts, Options::default());
+    let (root, keys) = store_tree(&ts.objects, "verified-pinned", 40);
+    put_test_ref(&c, &ts.refs, "main", root);
+    let independent = c.pin_ref("main").unwrap();
+    backdate_packs(&ts);
+    let first = c.run_verified(0.0).unwrap();
+    let second = c.run_verified(0.0).unwrap();
+    rm_test_ref(&c, &ts.refs, "main", root);
+    drop(first);
+    backdate_packs(&ts);
+    c.run(0.0).unwrap();
+    for key in &keys {
+        ts.objects.get(*key).unwrap();
+    }
+    drop(second);
+    backdate_packs(&ts);
+    c.run(0.0).unwrap();
+    for key in &keys {
+        ts.objects.get(*key).unwrap();
+    }
+    drop(independent);
+    backdate_packs(&ts);
+    c.run(0.0).unwrap();
+    assert!(keys.iter().any(|key| ts.objects.get(*key).is_err()));
+}
+
+#[test]
+fn verified_collection_rejects_corrupt_interior_and_releases_failed_pins() {
+    let ts = new_test_store(4 << 10);
+    let c = open_collector(&ts, Options::default());
+    let first = encode_blob(b"first");
+    let other = encode_blob(b"other");
+    ts.objects.put(first.key, &first.bytes).unwrap();
+    ts.objects.put(other.key, &other.bytes).unwrap();
+    let root = encode_file_node(&[first.key]);
+    let forged = encode_file_node(&[other.key]);
+    ts.objects.put(root.key, &forged.bytes).unwrap();
+    put_test_ref(&c, &ts.refs, "main", root.key);
+    c.run(0.0).unwrap();
+    let error = match c.run_verified(0.0) {
+        Err(error) => error,
+        Ok(_) => panic!("corrupt interior produced verified evidence"),
+    };
+    assert!(matches!(error, super::Error::InvalidInterior { key } if key == root.key));
+    rm_test_ref(&c, &ts.refs, "main", root.key);
+    backdate_packs(&ts);
+    c.run(0.0).unwrap();
+    assert!(ts.objects.get(root.key).is_err());
+}
+
+#[test]
+fn verified_collection_accepts_empty_root_set() {
+    let ts = new_test_store(4 << 10);
+    let c = open_collector(&ts, Options::default());
+    store_tree(&ts.objects, "verified-empty", 40);
+    backdate_packs(&ts);
+    let captured = c.run_verified(0.0).unwrap();
+    assert!(captured.roots().is_empty());
+    assert!(captured.keys().is_empty());
+    assert_eq!(captured.stats().marked, 0);
+}

@@ -1,0 +1,36 @@
+{
+  "source": "/nix/store/y5w4sj06wmf9mm5l4p4yi1k9gzbgnz47-source",
+  "unit": "forge-dev-c594a48e-3813-488a-abf9-06a926698a69.service",
+  "terminal": {
+    "InvocationID": "c9c602ded42644c6825e16ec5f241b11",
+    "MainPID": "0",
+    "Result": "success",
+    "ExecMainStatus": "0"
+  },
+  "hashes": [
+    {
+      "file": "src/gc/collector.rs",
+      "sha256": "31e3411a1f29862fd3e27907d94f310a6c57b3a370c6051b9e0870d6a7b3cf75"
+    },
+    {
+      "file": "src/gc/cycle.rs",
+      "sha256": "4c5b8760fb2aaa49fdb273dba3072f7bb9558c7143682e5697329f612dbc27a9"
+    },
+    {
+      "file": "src/gc/mod.rs",
+      "sha256": "a0abdd06baa581c28dbeb9c2dfc069720f1e2a42191a178d83d5bc80d6fc1509"
+    },
+    {
+      "file": "src/gc/tests.rs",
+      "sha256": "e0913162835b4b5ec0e69ce82539ad0fcf2af5854ba4bbfbe993c903f19f945e"
+    }
+  ],
+  "tests": [
+    "amber-core-store-check> test gc::tests::verified_collection_accepts_empty_root_set ... ok",
+    "amber-core-store-check> test gc::tests::verified_collection_rejects_corrupt_interior_and_releases_failed_pins ... ok",
+    "amber-core-store-check> test gc::tests::verified_collection_excludes_unpublished_barrier_objects ... ok",
+    "amber-core-store-check> test gc::tests::verified_collection_pins_survive_reference_removal_and_release_independently ... ok",
+    "amber-core-store-check> test result: ok. 463 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.00s"
+  ],
+  "base_revision": "f18052cd65f973bcee2baf08f3346a471e14f433"
+}

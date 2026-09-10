@@ -11,8 +11,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::packstore::CompactOpts;
 
-use super::collector::{Cancel, Core};
+use super::collector::{Cancel, Core, RootPins};
 use super::{Collector, Error, MIN_FREE_GARBAGE, Throttle, free_below, lock, write_lock};
+use crate::key::Key;
 
 /// Describes one cycle (Go: `CycleStats`).
 #[derive(Debug, Clone, PartialEq)]
@@ -43,7 +44,44 @@ pub struct CycleStats {
     pub freed_bytes: u64,
 }
 
+/// A verified root closure retained until this handle drops.
+/// Interior hashes and child decoding were checked during marking.
+/// Leaves retain presence semantics. This is not a scrub or physical-membership proof.
+#[must_use = "keep the handle alive while using its retained closure"]
+pub struct VerifiedCollection<'c> {
+    stats: CycleStats,
+    closure: VerifiedClosure<'c>,
+}
+
+struct VerifiedClosure<'c> {
+    pins: RootPins<'c>,
+    keys: Vec<Key>,
+}
+
+impl VerifiedCollection<'_> {
+    pub fn stats(&self) -> &CycleStats {
+        &self.stats
+    }
+    pub fn roots(&self) -> &[Key] {
+        &self.closure.pins.roots
+    }
+    pub fn keys(&self) -> &[Key] {
+        &self.closure.keys
+    }
+}
+
 impl Collector {
+    /// Captures checked closure keys during marking, excluding barrier additions.
+    /// Captured roots are pinned atomically with the root snapshot.
+    /// Validate current physical membership before persisting evidence.
+    pub fn run_verified(&self, garbage: f64) -> Result<VerifiedCollection<'_>, Error> {
+        let (stats, closure) = self.core.run_captured(garbage, None, true)?;
+        Ok(VerifiedCollection {
+            stats,
+            closure: closure.expect("requested verified closure"),
+        })
+    }
+
     /// Marks from every reference root and sweeps the eligible packs above
     /// the line: `garbage >= 0` forces that line, `garbage < 0` uses policy
     /// — 0.5, or 0.1 under min-free pressure. Ingests and reads run through
@@ -65,6 +103,16 @@ impl Core {
         garbage: f64,
         parent: Option<&AtomicBool>,
     ) -> Result<CycleStats, Error> {
+        self.run_captured(garbage, parent, false)
+            .map(|(stats, _)| stats)
+    }
+
+    fn run_captured(
+        &self,
+        garbage: f64,
+        parent: Option<&AtomicBool>,
+        capture: bool,
+    ) -> Result<(CycleStats, Option<VerifiedClosure<'_>>), Error> {
         let _cycle = match self.cycle_mu.try_lock() {
             Ok(g) => g,
             Err(std::sync::TryLockError::WouldBlock) => return Err(Error::CycleRunning),
@@ -72,7 +120,7 @@ impl Core {
         };
         let cancel = Arc::new(AtomicBool::new(false));
         lock(&self.mu).cancel_cycle = Some(Arc::clone(&cancel));
-        let (stats, res) = self.cycle(Cancel::new(&cancel, parent), garbage);
+        let (stats, res) = self.cycle(Cancel::new(&cancel, parent), garbage, capture);
         // Recorded on success and failure, then the cancel slot is cleared —
         // all before the cycle lock is released (Go: the mu block + defers).
         let mut st = lock(&self.mu);
@@ -80,12 +128,17 @@ impl Core {
         st.last_err = res.as_ref().err().map(|e| e.to_string());
         st.cancel_cycle = None;
         drop(st);
-        res.map(|()| stats)
+        res.map(|closure| (stats, closure))
     }
 
     /// One cycle body with the total-duration accounting (Go: `cycle` and
     /// its deferred `stats.Duration` store).
-    fn cycle(&self, cancel: Cancel<'_>, garbage: f64) -> (CycleStats, Result<(), Error>) {
+    fn cycle(
+        &self,
+        cancel: Cancel<'_>,
+        garbage: f64,
+        capture: bool,
+    ) -> (CycleStats, Result<Option<VerifiedClosure<'_>>, Error>) {
         let t0 = Instant::now();
         let mut stats = CycleStats {
             start: SystemTime::now(),
@@ -100,7 +153,7 @@ impl Core {
             copied_bytes: 0,
             freed_bytes: 0,
         };
-        let res = self.cycle_body(cancel, garbage, t0, &mut stats);
+        let res = self.cycle_body(cancel, garbage, t0, &mut stats, capture);
         stats.duration = t0.elapsed();
         (stats, res)
     }
@@ -111,7 +164,8 @@ impl Core {
         garbage: f64,
         t0: Instant,
         stats: &mut CycleStats,
-    ) -> Result<(), Error> {
+        capture: bool,
+    ) -> Result<Option<VerifiedClosure<'_>>, Error> {
         let mut threshold = garbage;
         if threshold < 0.0 {
             threshold = self.opts.garbage;
@@ -127,12 +181,8 @@ impl Core {
         // a PUT in flight commits or aborts before the snapshot; every
         // later PUT greys its walked closure, every later ingest its
         // written keys.
-        let roots = {
-            let _ref = write_lock(&self.ref_lock);
-            self.objects.begin_barrier();
-            self.roots()
-        };
-        let roots = match roots {
+        let roots = self.snapshot_roots(capture);
+        let (roots, pins) = match roots {
             Ok(roots) => roots,
             Err(e) => {
                 self.objects.abort_barrier();
@@ -140,7 +190,12 @@ impl Core {
             }
         };
 
-        let live = self.mark_live(cancel, &roots);
+        let mut keys = Vec::new();
+        let live = if capture {
+            self.mark_live_recorded::<true>(cancel, &roots, &mut keys)
+        } else {
+            self.mark_live(cancel, &roots)
+        };
         // The test hook runs after the mark returns but before its error
         // check, with no lock held (Go: the midMark read under mu).
         let hook = lock(&self.mu).mid_mark.clone();
@@ -191,7 +246,7 @@ impl Core {
                 stats.copied_records = cs.records_copied;
                 stats.copied_bytes = cs.bytes_copied;
                 stats.freed_bytes = cs.bytes_freed;
-                Ok(())
+                Ok(pins.map(|pins| VerifiedClosure { pins, keys }))
             }
             // Go maps the partial CompactStats even on error; the Rust
             // compact returns no stats with its error (see

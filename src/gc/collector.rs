@@ -379,14 +379,43 @@ impl Core {
         Ok(roots)
     }
 
+    pub(super) fn snapshot_roots(
+        &self,
+        capture: bool,
+    ) -> Result<(Vec<Key>, Option<RootPins<'_>>), Error> {
+        let _guard = super::write_lock(&self.ref_lock);
+        self.objects.begin_barrier();
+        let roots = self.roots()?;
+        let pins = capture.then(|| {
+            let mut counts = lock(&self.pins);
+            for root in &roots {
+                *counts.entry(*root).or_default() += 1;
+            }
+            RootPins {
+                core: self,
+                roots: roots.clone(),
+            }
+        });
+        Ok((roots, pins))
+    }
+
     /// Walks every root into a fresh mark set. The roots must be a snapshot
     /// taken under the reference lock; the walk touches only
     /// snapshot-reachable objects and runs concurrently with ingests (their
     /// writes join the barrier's grey set) (Go: `markLive`).
     pub(super) fn mark_live(&self, cancel: Cancel<'_>, roots: &[Key]) -> Result<MarkSet, Error> {
+        self.mark_live_recorded::<false>(cancel, roots, &mut Vec::new())
+    }
+
+    pub(super) fn mark_live_recorded<const VERIFY: bool>(
+        &self,
+        cancel: Cancel<'_>,
+        roots: &[Key],
+        keys: &mut Vec<Key>,
+    ) -> Result<MarkSet, Error> {
         let mut live = self.objects.new_mark_set().map_err(Error::Objects)?;
         for &root in roots {
-            self.mark_from(cancel, &mut live, root)?;
+            self.mark_from::<VERIFY>(cancel, &mut live, root, keys)?;
         }
         Ok(live)
     }
@@ -394,7 +423,13 @@ impl Core {
     /// Prunes at already-marked keys, so shared subtrees are walked once.
     /// Blob and xattr payloads are marked without being read (Go:
     /// `markFrom`).
-    fn mark_from(&self, cancel: Cancel<'_>, live: &mut MarkSet, root: Key) -> Result<(), Error> {
+    fn mark_from<const VERIFY: bool>(
+        &self,
+        cancel: Cancel<'_>,
+        live: &mut MarkSet,
+        root: Key,
+        keys: &mut Vec<Key>,
+    ) -> Result<(), Error> {
         let mut stack = vec![root];
         for n in 0usize.. {
             if stack.is_empty() {
@@ -412,14 +447,38 @@ impl Core {
             if !newly {
                 continue;
             }
+            if VERIFY {
+                keys.push(k);
+            }
             if matches!(k.type_(), Type::Blob | Type::XattrSet) {
                 continue;
             }
             let data = self.objects.get(k).map_err(Error::Objects)?;
+            if VERIFY && Key::new(k.type_(), k.length(), &data) != k {
+                return Err(Error::InvalidInterior { key: k });
+            }
             let children = child_keys(k, &data).map_err(Error::Children)?;
             stack.extend(children);
         }
         Ok(())
+    }
+}
+
+pub(super) struct RootPins<'c> {
+    core: &'c Core,
+    pub(super) roots: Vec<Key>,
+}
+
+impl Drop for RootPins<'_> {
+    fn drop(&mut self) {
+        let mut counts = lock(&self.core.pins);
+        for root in &self.roots {
+            let count = counts.get_mut(root).expect("registered root pin");
+            *count -= 1;
+            if *count == 0 {
+                counts.remove(root);
+            }
+        }
     }
 }
 
