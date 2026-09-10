@@ -127,6 +127,8 @@ fn validate_batch<'a>(
 struct CopyBatch {
     bytes: Vec<u8>,
     index: std::collections::HashMap<Key, super::ActiveLoc>,
+    present: Vec<bool>,
+    seen: std::collections::HashSet<Key>,
 }
 
 impl CopyBatch {
@@ -182,22 +184,60 @@ impl Store {
         Ok(())
     }
 
+    // The caller holds the append lock through lookup and writing. Hits cannot disappear,
+    // and duplicate input keys refer to an earlier successful write in this batch.
+    fn copy_membership(
+        &self,
+        records: &[Result<ValidatedRecord<'_>, Error>],
+        batch: &mut CopyBatch,
+    ) -> Result<(), Error> {
+        let shared = unpoison(self.shared.read());
+        if shared.closed {
+            return Err(Error::Closed);
+        }
+        if let Some(message) = &shared.failed {
+            return Err(Error::Failed(message.clone()));
+        }
+        let active = shared
+            .active
+            .as_ref()
+            .map(|segment| unpoison(segment.index.read()));
+        batch.present.clear();
+        batch.present.resize(records.len(), false);
+        batch.seen.clear();
+        let mut unresolved = 0;
+        for (result, present) in records.iter().zip(&mut batch.present) {
+            let Ok(record) = result else { break };
+            *present = !batch.seen.insert(record.key)
+                || active
+                    .as_ref()
+                    .is_some_and(|index| index.contains_key(&record.key));
+            unresolved += usize::from(!*present);
+        }
+        for segment in shared.sealed.iter().rev() {
+            if unresolved == 0 {
+                break;
+            }
+            let segment = segment.load()?;
+            for (result, present) in records.iter().zip(&mut batch.present) {
+                let Ok(record) = result else { break };
+                if !*present && segment.has(record.key) {
+                    *present = true;
+                    unresolved -= 1;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn put_validated_records(
         &self,
         records: Vec<Result<ValidatedRecord<'_>, Error>>,
         batch: &mut CopyBatch,
     ) -> Result<(), Error> {
         let mut append = self.append_lock();
-        {
-            let shared = unpoison(self.shared.read());
-            if shared.closed {
-                return Err(Error::Closed);
-            }
-            if let Some(message) = &shared.failed {
-                return Err(Error::Failed(message.clone()));
-            }
-        }
-        for result in records {
+        self.copy_membership(&records, batch)?;
+        for (index, result) in records.into_iter().enumerate() {
             let record = match result {
                 Ok(record) => record,
                 Err(error) => {
@@ -206,16 +246,8 @@ impl Store {
                 }
             };
             self.observe(record.key);
-            if batch.index.contains_key(&record.key) {
+            if batch.present[index] {
                 continue;
-            }
-            match self.has(record.key) {
-                Ok(true) => continue,
-                Ok(false) => {}
-                Err(error) => {
-                    self.flush_copy_batch(&mut append, batch)?;
-                    return Err(error);
-                }
             }
             // Oversized records already amortize a syscall; avoid an extra large allocation.
             if record.bytes.len() >= 1024 * 1024 {
@@ -560,6 +592,7 @@ mod tests {
         source.put_unflushed(large.key, &large.data).unwrap();
         keys.push(large.key);
         keys.push(keys[17]);
+        keys.push(keys[250]);
         let reference_dir = TempDir::new().unwrap();
         let options = Options::default().segment_size(8192);
         let reference = Store::open_with(reference_dir.path(), options).unwrap();
@@ -601,6 +634,48 @@ mod tests {
                     reference.get_record(*key).unwrap()
                 );
             }
+        }
+    }
+
+    #[test]
+    fn batch_membership_deduplicates_across_rotation() {
+        let source_dir = TempDir::new().unwrap();
+        let source = Store::open(source_dir.path()).unwrap();
+        let objects = [blob_obj(b"first"), blob_obj(b"existing"), blob_obj(b"last")];
+        for object in &objects {
+            source.put_unflushed(object.key, &object.data).unwrap();
+        }
+        let target_dir = TempDir::new().unwrap();
+        let target =
+            Store::open_with(target_dir.path(), Options::default().segment_size(1)).unwrap();
+        target
+            .put_unflushed(objects[1].key, &objects[1].data)
+            .unwrap();
+        target.begin_barrier();
+        let keys = vec![
+            objects[0].key,
+            objects[0].key,
+            objects[1].key,
+            objects[2].key,
+            objects[2].key,
+        ];
+        source
+            .records_in_order(keys.clone())
+            .unwrap()
+            .copy_with_workers(&target, 1)
+            .unwrap();
+        assert_eq!(target.take_grey().unwrap(), keys.into_iter().collect());
+        assert_eq!(
+            target
+                .segments()
+                .unwrap()
+                .iter()
+                .map(|segment| segment.keys)
+                .sum::<u64>(),
+            3
+        );
+        for object in objects {
+            assert_eq!(target.get(object.key).unwrap(), object.data);
         }
     }
 
