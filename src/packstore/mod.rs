@@ -823,32 +823,8 @@ impl Store {
                 return Err(Error::Failed(msg.clone()));
             }
         }
-        let record = amberpack::parse_record(bytes).map_err(Error::Pack)?;
-        if record.key != k || bytes.len() != REC_HEADER_SIZE + record.slen as usize {
-            return Err(Error::Verify(
-                "encoded record key or length mismatch".into(),
-            ));
-        }
-        let payload = &bytes[REC_HEADER_SIZE..];
-        let data = if record.flags == 0 {
-            std::borrow::Cow::Borrowed(payload)
-        } else {
-            std::borrow::Cow::Owned(
-                decode_payload(record.flags, record.ulen, payload).map_err(Error::Pack)?,
-            )
-        };
-        if Key::new(k.type_(), k.length(), &data) != k {
-            return Err(Error::Verify(
-                "encoded record payload checksum mismatch".into(),
-            ));
-        }
-        drop(data);
-        // Dedup hits must remain visible to an active collection barrier.
-        self.observe(k);
-        if self.has(k)? {
-            return Ok(());
-        }
-        self.append(k, bytes, false)
+        let record = records::ValidatedRecord::new(k, std::borrow::Cow::Borrowed(bytes))?;
+        self.put_validated_record(record)
     }
 
     fn put_with_sync(&self, k: Key, data: &[u8], sync_now: bool) -> Result<(), Error> {
