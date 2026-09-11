@@ -107,6 +107,48 @@ impl MarkSet {
         }
     }
 
+    /// Marks keys in input order while grouping lookups by sealed segment.
+    /// Results match repeated `mark` calls, including duplicate and absent keys.
+    /// Temporary memory is proportional to the input length; callers bound batches.
+    pub fn mark_many(&mut self, keys: &[Key]) -> Vec<(bool, bool)> {
+        let mut result = vec![(false, false); keys.len()];
+        let mut pending = Vec::with_capacity(keys.len());
+        for (input, key) in keys.iter().enumerate() {
+            if let Some(slot) = self.active.get_mut(key) {
+                let newly = !*slot;
+                *slot = true;
+                self.marked += usize::from(newly);
+                result[input] = (newly, true);
+            } else {
+                pending.push(input);
+            }
+        }
+        let bits = &mut self.bits;
+        let marked = &mut self.marked;
+        for (segment, view) in self.segs.iter().enumerate().rev() {
+            if pending.is_empty() {
+                break;
+            }
+            pending.retain(|&input| {
+                let key = keys[input];
+                if !view.fv.filter_contains(&view.mm, filter_key(key)) {
+                    return true;
+                }
+                let Some(position) = view.fv.lookup_pos(&view.mm, key) else {
+                    return true;
+                };
+                let word = &mut bits[segment][position / 64];
+                let mask = 1u64 << (position % 64);
+                let newly = *word & mask == 0;
+                *word |= mask;
+                *marked += usize::from(newly);
+                result[input] = (newly, true);
+                false
+            });
+        }
+        result
+    }
+
     /// Reports whether `k` has been marked (Go: `Contains`).
     pub fn contains(&self, k: Key) -> bool {
         match self.locate(k) {
@@ -242,6 +284,59 @@ mod tests {
     use super::*;
     use crate::key::Type;
     use tempfile::TempDir;
+
+    #[test]
+    fn batched_marks_match_scalar_order_and_newest_physical_records() {
+        let directory = TempDir::new().unwrap();
+        let store =
+            Store::open_with(directory.path(), super::super::Options::new().sync(false)).unwrap();
+        let duplicate = Key::new(Type::Blob, 9, b"duplicate");
+        let record = super::super::encode_record(duplicate, b"duplicate").unwrap();
+        let mut keys = vec![duplicate];
+        for segment in 0u8..4 {
+            for index in 0u8..17 {
+                let data = [segment, index];
+                let key = Key::new(Type::Blob, data.len() as u64, &data);
+                store.put(key, &data).unwrap();
+                keys.push(key);
+            }
+            store.append(duplicate, &record, false).unwrap();
+            store.seal_snapshot().unwrap();
+        }
+        store.append(duplicate, &record, false).unwrap();
+        for index in 0u8..5 {
+            let data = [99, index];
+            let key = Key::new(Type::Blob, data.len() as u64, &data);
+            store.put(key, &data).unwrap();
+            keys.push(key);
+        }
+        let absent = Key::new(Type::Blob, 6, b"absent");
+        let mut queries = vec![keys[1], duplicate, absent, duplicate];
+        for key in keys.iter().rev() {
+            queries.extend([*key, absent, *key]);
+        }
+        for sealed in [false, true] {
+            if sealed {
+                store.seal_snapshot().unwrap();
+            }
+            for width in [1, 2, 7, 256] {
+                let mut scalar = store.new_mark_set().unwrap();
+                let mut batch = store.new_mark_set().unwrap();
+                scalar.mark(keys[1]);
+                batch.mark(keys[1]);
+                assert!(batch.mark_many(&[]).is_empty());
+                for chunk in queries.chunks(width) {
+                    let expected: Vec<_> = chunk.iter().map(|key| scalar.mark(*key)).collect();
+                    assert_eq!(batch.mark_many(chunk), expected);
+                    assert_eq!(batch.marked, scalar.marked);
+                    assert_eq!(batch.bits, scalar.bits);
+                    assert_eq!(batch.active, scalar.active);
+                }
+                assert_eq!(batch.marked(), keys.len());
+                assert!(!batch.contains(absent));
+            }
+        }
+    }
 
     #[test]
     fn indexed_mark_requires_the_captured_segment_identity() {

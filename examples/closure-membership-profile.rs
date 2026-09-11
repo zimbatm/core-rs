@@ -30,6 +30,17 @@ fn usage() -> io::Result<libc::rusage> {
     Ok(unsafe { value.assume_init() })
 }
 
+fn main_thread_usage() -> io::Result<[u64; 3]> {
+    let raw = fs::read_to_string("/proc/thread-self/schedstat")?;
+    let values = raw
+        .split_whitespace()
+        .map(|value| value.parse::<u64>().map_err(io::Error::other))
+        .collect::<io::Result<Vec<_>>>()?;
+    values
+        .try_into()
+        .map_err(|_| io::Error::other("invalid thread scheduler counters"))
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().collect();
     if args.len() != 5 {
@@ -42,9 +53,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mode = args[4].as_str();
     if !source.is_absolute()
         || !output.is_absolute()
-        || !matches!(mode, "list" | "indexed" | "indexed-parallel")
+        || !matches!(
+            mode,
+            "list" | "indexed" | "indexed-parallel" | "indexed-batch"
+        )
     {
-        return Err("expected absolute paths and list, indexed, or indexed-parallel mode".into());
+        return Err("expected absolute paths and a supported membership mode".into());
     }
     if args[2].len() != 64 || !args[2].is_ascii() {
         return Err("expected 64 hexadecimal root digits".into());
@@ -60,6 +74,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let open_seconds = opening.elapsed().as_secs_f64();
     let reads = AtomicU64::new(0);
     let before = usage()?;
+    let thread_before = main_thread_usage()?;
     let started = Instant::now();
     let mut marks = store.new_mark_set()?;
     let snapshot_seconds = started.elapsed().as_secs_f64();
@@ -68,6 +83,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut keys_buffer_bytes = 0usize;
     let walk_started = Instant::now();
     let membership_seconds;
+    let mut mark_batch_seconds = 0.0;
+    let mut read_batch_seconds = 0.0;
     if mode == "list" {
         let keys = check_complete(
             root,
@@ -83,29 +100,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         membership_seconds = membership.elapsed().as_secs_f64();
-    } else if mode == "indexed-parallel" {
+    } else if matches!(mode, "indexed-parallel" | "indexed-batch") {
         let mut pending = vec![root];
         let mut batch = Vec::with_capacity(4096);
+        let mut key_batch = Vec::with_capacity(256);
         peak_pending = 1;
         while !pending.is_empty() {
+            let marking = Instant::now();
             batch.clear();
-            while batch.len() < 4096 {
-                let Some(key) = pending.pop() else { break };
-                let (newly, present) = marks.mark(key);
-                if !present {
-                    return Err("reachable key missing from captured membership".into());
+            if mode == "indexed-batch" {
+                while batch.len() < 4096 && !pending.is_empty() {
+                    key_batch.clear();
+                    let count = 256.min(4096 - batch.len()).min(pending.len());
+                    for _ in 0..count {
+                        key_batch.push(pending.pop().unwrap());
+                    }
+                    let flags = marks.mark_many(&key_batch);
+                    for (&key, (newly, present)) in key_batch.iter().zip(flags) {
+                        if !present {
+                            return Err("reachable key missing from captured membership".into());
+                        }
+                        if !newly {
+                            duplicate_pops += 1;
+                            continue;
+                        }
+                        if !matches!(key.type_(), Type::Blob | Type::XattrSet) {
+                            batch.push(key);
+                        }
+                    }
                 }
-                if !newly {
-                    duplicate_pops += 1;
-                    continue;
-                }
-                if !matches!(key.type_(), Type::Blob | Type::XattrSet) {
-                    batch.push(key);
+            } else {
+                while batch.len() < 4096 {
+                    let Some(key) = pending.pop() else { break };
+                    let (newly, present) = marks.mark(key);
+                    if !present {
+                        return Err("reachable key missing from captured membership".into());
+                    }
+                    if !newly {
+                        duplicate_pops += 1;
+                        continue;
+                    }
+                    if !matches!(key.type_(), Type::Blob | Type::XattrSet) {
+                        batch.push(key);
+                    }
                 }
             }
+            mark_batch_seconds += marking.elapsed().as_secs_f64();
             if batch.is_empty() {
                 continue;
             }
+            let reading = Instant::now();
             std::thread::scope(|scope| -> io::Result<()> {
                 let workers: Vec<_> = batch
                     .chunks(batch.len().div_ceil(8))
@@ -132,6 +176,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 Ok(())
             })?;
+            read_batch_seconds += reading.elapsed().as_secs_f64();
         }
         membership_seconds = 0.0;
     } else {
@@ -158,6 +203,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let marked = marks.marked();
 
     let total_seconds = started.elapsed().as_secs_f64();
+    let thread_after = main_thread_usage()?;
     let after = usage()?;
     let verification = Instant::now();
     let selected = std::cell::RefCell::new(Vec::with_capacity(marked));
@@ -191,11 +237,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "mode": mode, "root": args[2], "objects": marked, "interior_reads": reads.load(Relaxed),
         "membership_digest": digest.finalize().to_hex().to_string(),
         "verification_seconds": verification_seconds, "open_seconds": open_seconds,
-        "workers": if mode == "indexed" { 1 } else { 8 }, "interior_batch_limit": if mode == "indexed-parallel" { Some(4096) } else { None::<usize> }, "snapshot_seconds": snapshot_seconds, "walk_and_membership_seconds": walk_and_membership_seconds,
-        "membership_seconds": membership_seconds, "total_seconds": total_seconds,
+        "workers": if mode == "indexed" { 1 } else { 8 }, "interior_batch_limit": if matches!(mode, "indexed-parallel" | "indexed-batch") { Some(4096) } else { None::<usize> }, "snapshot_seconds": snapshot_seconds, "walk_and_membership_seconds": walk_and_membership_seconds,
+        "lookup_batch_limit": if mode == "indexed-batch" { 256 } else { 1 }, "membership_seconds": membership_seconds, "total_seconds": total_seconds,
         "user_seconds": seconds(after.ru_utime)-seconds(before.ru_utime),
         "system_seconds": seconds(after.ru_stime)-seconds(before.ru_stime),
         "peak_rss_bytes": after.ru_maxrss as u64 * 1024,
+        "minor_faults": after.ru_minflt - before.ru_minflt,
+        "major_faults": after.ru_majflt - before.ru_majflt,
+        "voluntary_context_switches": after.ru_nvcsw - before.ru_nvcsw,
+        "involuntary_context_switches": after.ru_nivcsw - before.ru_nivcsw,
+        "main_thread_cpu_seconds": (thread_after[0] - thread_before[0]) as f64 / 1e9,
+        "main_thread_runqueue_seconds": (thread_after[1] - thread_before[1]) as f64 / 1e9,
+        "mark_batch_seconds": if matches!(mode, "indexed-parallel" | "indexed-batch") { Some(mark_batch_seconds) } else { None },
+        "read_batch_seconds": if matches!(mode, "indexed-parallel" | "indexed-batch") { Some(read_batch_seconds) } else { None },
         "keys_buffer_bytes": keys_buffer_bytes, "duplicate_pops": duplicate_pops,
         "peak_pending": peak_pending,
         "scope": "Initial closure and membership only; list uses 8 workers, indexed uses serial DFS; indexed-parallel batches at most 4096 interiors across 8 workers. No boundaries, sealing, fs-verity, signing, Git validation, or publication. RSS covers opening and the timed phase. Sorted-key hash-manifest verification follows outside timing and RSS sampling."
