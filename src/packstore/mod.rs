@@ -28,7 +28,7 @@ pub use snapshot::SegmentSnapshot;
 
 pub use compact::{CompactOpts, CompactStats, SegmentLiveness};
 pub use gc::SegmentInfo;
-pub use markset::{MarkSet, SealedMembership, SegmentBitmap};
+pub use markset::{ConcurrentMarkSet, MarkSet, SealedMembership, SegmentBitmap};
 pub use parallel::{DEFAULT_BATCH_SIZE, WriteOpts, WriteStats};
 
 use std::collections::{BTreeMap, HashMap, HashSet};

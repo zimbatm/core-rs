@@ -30,6 +30,17 @@ fn usage() -> io::Result<libc::rusage> {
     Ok(unsafe { value.assume_init() })
 }
 
+fn main_thread_usage() -> io::Result<[u64; 3]> {
+    let raw = fs::read_to_string("/proc/thread-self/schedstat")?;
+    let values = raw
+        .split_whitespace()
+        .map(|value| value.parse::<u64>().map_err(io::Error::other))
+        .collect::<io::Result<Vec<_>>>()?;
+    values
+        .try_into()
+        .map_err(|_| io::Error::other("invalid thread scheduler counters"))
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().collect();
     if args.len() != 5 {
@@ -42,9 +53,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mode = args[4].as_str();
     if !source.is_absolute()
         || !output.is_absolute()
-        || !matches!(mode, "list" | "indexed" | "indexed-parallel")
+        || !matches!(
+            mode,
+            "list" | "indexed" | "indexed-parallel" | "indexed-concurrent"
+        )
     {
-        return Err("expected absolute paths and list, indexed, or indexed-parallel mode".into());
+        return Err("expected absolute paths and a supported membership mode".into());
     }
     if args[2].len() != 64 || !args[2].is_ascii() {
         return Err("expected 64 hexadecimal root digits".into());
@@ -60,6 +74,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let open_seconds = opening.elapsed().as_secs_f64();
     let reads = AtomicU64::new(0);
     let before = usage()?;
+    let thread_before = main_thread_usage()?;
     let started = Instant::now();
     let mut marks = store.new_mark_set()?;
     let snapshot_seconds = started.elapsed().as_secs_f64();
@@ -68,7 +83,70 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut keys_buffer_bytes = 0usize;
     let walk_started = Instant::now();
     let membership_seconds;
-    if mode == "list" {
+    let mut mark_batch_seconds = 0.0;
+    let mut read_batch_seconds = 0.0;
+    let mut concurrent_batch_seconds = 0.0;
+    let mut freeze_seconds = 0.0;
+    if mode == "indexed-concurrent" {
+        let shared = marks.into_concurrent();
+        let mut pending = vec![root];
+        let mut batch = Vec::with_capacity(4096);
+        peak_pending = 1;
+        while !pending.is_empty() {
+            let started = Instant::now();
+            batch.clear();
+            for _ in 0..4096.min(pending.len()) {
+                batch.push(pending.pop().unwrap());
+            }
+            std::thread::scope(|scope| -> io::Result<()> {
+                let workers: Vec<_> = batch
+                    .chunks(batch.len().div_ceil(8))
+                    .map(|keys| {
+                        let shared = &shared;
+                        let store = &store;
+                        let reads = &reads;
+                        scope.spawn(move || -> io::Result<(Vec<Key>, u64)> {
+                            let mut children = Vec::new();
+                            let mut duplicates = 0;
+                            for &key in keys {
+                                let (newly, present) = shared.mark(key);
+                                if !present {
+                                    return Err(io::Error::new(
+                                        io::ErrorKind::NotFound,
+                                        "reachable key missing from captured membership",
+                                    ));
+                                }
+                                if !newly {
+                                    duplicates += 1;
+                                    continue;
+                                }
+                                if !matches!(key.type_(), Type::Blob | Type::XattrSet) {
+                                    let data = read(store, key, reads)?;
+                                    children
+                                        .extend(child_keys(key, &data).map_err(io::Error::other)?);
+                                }
+                            }
+                            Ok((children, duplicates))
+                        })
+                    })
+                    .collect();
+                for worker in workers {
+                    let (children, duplicates) = worker
+                        .join()
+                        .map_err(|_| io::Error::other("membership worker panicked"))??;
+                    pending.extend(children);
+                    duplicate_pops += duplicates;
+                    peak_pending = peak_pending.max(pending.len());
+                }
+                Ok(())
+            })?;
+            concurrent_batch_seconds += started.elapsed().as_secs_f64();
+        }
+        let freeze = Instant::now();
+        marks = shared.into_mark_set();
+        freeze_seconds = freeze.elapsed().as_secs_f64();
+        membership_seconds = 0.0;
+    } else if mode == "list" {
         let keys = check_complete(
             root,
             |key| read(&store, key, &reads),
@@ -88,6 +166,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut batch = Vec::with_capacity(4096);
         peak_pending = 1;
         while !pending.is_empty() {
+            let marking = Instant::now();
             batch.clear();
             while batch.len() < 4096 {
                 let Some(key) = pending.pop() else { break };
@@ -103,9 +182,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     batch.push(key);
                 }
             }
+            mark_batch_seconds += marking.elapsed().as_secs_f64();
             if batch.is_empty() {
                 continue;
             }
+            let reading = Instant::now();
             std::thread::scope(|scope| -> io::Result<()> {
                 let workers: Vec<_> = batch
                     .chunks(batch.len().div_ceil(8))
@@ -132,6 +213,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 Ok(())
             })?;
+            read_batch_seconds += reading.elapsed().as_secs_f64();
         }
         membership_seconds = 0.0;
     } else {
@@ -158,6 +240,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let marked = marks.marked();
 
     let total_seconds = started.elapsed().as_secs_f64();
+    let thread_after = main_thread_usage()?;
     let after = usage()?;
     let verification = Instant::now();
     let selected = std::cell::RefCell::new(Vec::with_capacity(marked));
@@ -192,10 +275,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "membership_digest": digest.finalize().to_hex().to_string(),
         "verification_seconds": verification_seconds, "open_seconds": open_seconds,
         "workers": if mode == "indexed" { 1 } else { 8 }, "interior_batch_limit": if mode == "indexed-parallel" { Some(4096) } else { None::<usize> }, "snapshot_seconds": snapshot_seconds, "walk_and_membership_seconds": walk_and_membership_seconds,
-        "membership_seconds": membership_seconds, "total_seconds": total_seconds,
+        "key_batch_limit": if mode == "indexed-concurrent" { Some(4096) } else { None },
+        "concurrent_batch_seconds": if mode == "indexed-concurrent" { Some(concurrent_batch_seconds) } else { None },
+        "freeze_seconds": freeze_seconds, "membership_seconds": membership_seconds, "total_seconds": total_seconds,
         "user_seconds": seconds(after.ru_utime)-seconds(before.ru_utime),
         "system_seconds": seconds(after.ru_stime)-seconds(before.ru_stime),
         "peak_rss_bytes": after.ru_maxrss as u64 * 1024,
+        "minor_faults": after.ru_minflt - before.ru_minflt,
+        "major_faults": after.ru_majflt - before.ru_majflt,
+        "voluntary_context_switches": after.ru_nvcsw - before.ru_nvcsw,
+        "involuntary_context_switches": after.ru_nivcsw - before.ru_nivcsw,
+        "main_thread_cpu_seconds": (thread_after[0] - thread_before[0]) as f64 / 1e9,
+        "main_thread_runqueue_seconds": (thread_after[1] - thread_before[1]) as f64 / 1e9,
+        "mark_batch_seconds": if mode == "indexed-parallel" { Some(mark_batch_seconds) } else { None },
+        "read_batch_seconds": if mode == "indexed-parallel" { Some(read_batch_seconds) } else { None },
         "keys_buffer_bytes": keys_buffer_bytes, "duplicate_pops": duplicate_pops,
         "peak_pending": peak_pending,
         "scope": "Initial closure and membership only; list uses 8 workers, indexed uses serial DFS; indexed-parallel batches at most 4096 interiors across 8 workers. No boundaries, sealing, fs-verity, signing, Git validation, or publication. RSS covers opening and the timed phase. Sorted-key hash-manifest verification follows outside timing and RSS sampling."
