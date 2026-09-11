@@ -1,7 +1,7 @@
 # Verified closure membership API
 
 fstree::verify_membership constructs complete membership during a bounded parallel traversal.
-It uses the measured indexed traversal described in closure-membership.md.
+It uses concurrent marking described in concurrent-membership.md.
 The library implementation does not include benchmark counters or verification passes.
 
 VerifiedClosure has private root and MarkSet fields.
@@ -21,12 +21,12 @@ That conversion returns physical membership without the root binding.
 The certificate assembler must check the root before consuming the evidence.
 The API does not seal, synchronize, sign, publish, or install GC marks.
 
-Each batch contains at most 4,096 interiors.
-The jobs argument controls read workers; zero uses available parallelism.
+Each batch contains at most 4,096 keys.
+The jobs argument controls marking and read workers; zero uses available parallelism.
 Pending keys and decoded child lists have no independent byte limit.
 The API has no previously validated boundaries or partial-success result.
 
-## Validation
+## Initial scalar implementation validation
 
 All 470 Core tests passed on bld1.
 Four new tests cover differential membership, missing records, invalid interiors, and evidence scope.
@@ -43,3 +43,20 @@ Only the public concurrency documentation changed after this gate.
 The result record preserves tested source hashes and the unchanged code digest.
 
 Forge integration and complete certificate performance measurements remain separate work.
+
+## Concurrent runtime traversal
+
+The verifier now uses atomic marking across batches of at most 4,096 keys.
+Workers verify newly claimed interiors and return their children.
+The caller joins every worker before propagating errors or constructing verified evidence.
+The root binding, presence-only leaf rule, and retention requirements remain unchanged.
+
+All 472 Core tests passed on bld1.
+The existing differential test compares exact membership across multiple batches with one and eight workers.
+The new test mixes valid objects with missing leaves, missing interiors, bad checksums, or malformed interiors.
+It repeats references across workers in active and sealed snapshots with one, two, and eight workers.
+Every case returns the expected object-specific error instead of partial evidence.
+
+The component benchmark measured the prototype, not this library integration.
+Downstream integration and full certificate measurements remain pending.
+[Runtime test evidence](concurrent-verifier.json) identifies the tested source and build.

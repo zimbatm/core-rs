@@ -56,7 +56,7 @@ impl VerifiedClosure {
 /// The caller must exclude collection and record replacement during this walk
 /// and subsequent certificate construction. Captured mappings are not pins.
 /// No previously verified boundary can skip this walk.
-/// Zero jobs uses available parallelism. Each batch has at most 4096 interiors.
+/// Zero jobs uses available parallelism. Each batch has at most 4096 keys.
 pub fn verify_membership(
     store: &Store,
     root: Key,
@@ -69,31 +69,32 @@ pub fn verify_membership(
     } else {
         jobs
     };
-    let mut marks = store.new_mark_set().map_err(MembershipError::Snapshot)?;
+    let marks = store
+        .new_mark_set()
+        .map_err(MembershipError::Snapshot)?
+        .into_concurrent();
     let mut pending = vec![root];
     let mut batch = Vec::with_capacity(4096);
     while !pending.is_empty() {
         batch.clear();
-        while batch.len() < 4096 {
-            let Some(key) = pending.pop() else { break };
-            let (newly, present) = marks.mark(key);
-            if !present {
-                return Err(MembershipError::Missing { key });
-            }
-            if newly && !matches!(key.type_(), Type::Blob | Type::XattrSet) {
-                batch.push(key);
-            }
-        }
-        if batch.is_empty() {
-            continue;
+        for _ in 0..4096.min(pending.len()) {
+            batch.push(pending.pop().unwrap());
         }
         std::thread::scope(|scope| -> Result<(), MembershipError> {
             let workers: Vec<_> = batch
                 .chunks(batch.len().div_ceil(jobs))
                 .map(|keys| {
+                    let marks = &marks;
                     scope.spawn(move || -> Result<Vec<Key>, MembershipError> {
                         let mut children = Vec::new();
                         for &key in keys {
+                            let (newly, present) = marks.mark(key);
+                            if !present {
+                                return Err(MembershipError::Missing { key });
+                            }
+                            if !newly || matches!(key.type_(), Type::Blob | Type::XattrSet) {
+                                continue;
+                            }
                             let data = store
                                 .get(key)
                                 .map_err(|source| MembershipError::Read { key, source })?;
@@ -109,13 +110,18 @@ pub fn verify_membership(
                     })
                 })
                 .collect();
-            for worker in workers {
-                pending.extend(worker.join().map_err(|_| MembershipError::WorkerPanic)??);
+            // Join every worker before propagating errors, including worker panics.
+            let results: Vec<_> = workers.into_iter().map(|worker| worker.join()).collect();
+            for result in results {
+                pending.extend(result.map_err(|_| MembershipError::WorkerPanic)??);
             }
             Ok(())
         })?;
     }
-    Ok(VerifiedClosure { root, marks })
+    Ok(VerifiedClosure {
+        root,
+        marks: marks.into_mark_set(),
+    })
 }
 
 #[cfg(test)]
@@ -203,6 +209,67 @@ mod tests {
         ));
         store.close().unwrap();
         assert!(verify_membership(&store, file.key, 8).is_err());
+    }
+
+    #[test]
+    fn concurrent_failures_never_produce_partial_evidence() {
+        for failure in ["missing-interior", "missing-leaf", "checksum", "malformed"] {
+            let (_directory, store) = store();
+            let mut children = Vec::new();
+            let mut failed_key = None;
+            for index in 0u64..64 {
+                let blob = encode_blob(&index.to_le_bytes());
+                let file = encode_file_node(&[blob.key]);
+                let broken = index == 31;
+                if !(broken && failure == "missing-leaf") {
+                    store.put(blob.key, &blob.bytes).unwrap();
+                }
+                let key = if broken && failure == "malformed" {
+                    let bytes = [0xff];
+                    let key = Key::new(Type::FileNode, 0, &bytes);
+                    store.put(key, &bytes).unwrap();
+                    key
+                } else {
+                    if !(broken && failure == "missing-interior") {
+                        let bytes: &[u8] = if broken && failure == "checksum" {
+                            b"wrong payload"
+                        } else {
+                            &file.bytes
+                        };
+                        store.put(file.key, bytes).unwrap();
+                    }
+                    file.key
+                };
+                if broken {
+                    failed_key = Some(if failure == "missing-leaf" {
+                        blob.key
+                    } else {
+                        key
+                    });
+                }
+                children.push(key);
+            }
+            children.extend_from_within(..);
+            let root = encode_file_node(&children);
+            store.put(root.key, &root.bytes).unwrap();
+            for sealed in [false, true] {
+                if sealed {
+                    store.seal_snapshot().unwrap();
+                }
+                for jobs in [1, 2, 8] {
+                    let error = verify_membership(&store, root.key, jobs).err().unwrap();
+                    let key = match (failure, error) {
+                        ("missing-interior" | "missing-leaf", MembershipError::Missing { key }) => {
+                            key
+                        }
+                        ("checksum", MembershipError::InvalidInterior { key }) => key,
+                        ("malformed", MembershipError::Children { key, .. }) => key,
+                        (_, error) => panic!("unexpected failure: {error}"),
+                    };
+                    assert_eq!(Some(key), failed_key);
+                }
+            }
+        }
     }
 
     #[test]

@@ -1,0 +1,23 @@
+{
+  "source": {
+    "revision": "f0a56b1faacbd861d963442baf05dd9d880d8314",
+    "diff_sha256": "1f6273d155523978cb509fcf8c423f86c4b290cf6425bbd3a6cc190f81563278"
+  },
+  "unit": "forge-dev-223bb2a4-462f-4924-9406-d4869e5dc94d.service",
+  "invocation": "a40625c86db94907aa22403cc84ab702",
+  "directory": "/home/forge-dev-builds/223bb2a4-462f-4924-9406-d4869e5dc94d",
+  "derivation": "/nix/store/jlhlx313f5y1170pmg6izh9sdwb9cl6d-amber-core-store-check-0.1.0.drv",
+  "output": "/nix/store/ina87j41r3cm0hmcsjb3dg47nhc9cf35-amber-core-store-check-0.1.0",
+  "status": {
+    "MainPID": 0,
+    "Result": "success",
+    "ExecMainStatus": 0,
+    "SubState": "exited"
+  },
+  "tests": {
+    "passed": 472,
+    "failed": 0,
+    "ignored": 0
+  },
+  "scope": "Core library integration; downstream integration and full certificate measurements pending"
+}
