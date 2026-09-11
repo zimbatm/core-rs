@@ -14,7 +14,9 @@ mod builder;
 mod decode;
 mod encode;
 mod fx;
+mod membership;
 mod read;
+pub use membership::{MembershipError, VerifiedClosure, verify_membership};
 
 use std::fmt;
 

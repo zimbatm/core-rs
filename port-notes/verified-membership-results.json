@@ -1,0 +1,30 @@
+{
+  "build": {
+    "derivations": [
+      "/nix/store/mn7imnk8fw6p7fszjqfyaxyd0qxk55yp-amber-core-store-check-0.1.0.drv"
+    ],
+    "exit_code": 0,
+    "elapsed": "27sec 20ms 721µs 51ns",
+    "outputs": [
+      {
+        "drvPath": "/nix/store/mn7imnk8fw6p7fszjqfyaxyd0qxk55yp-amber-core-store-check-0.1.0.drv",
+        "outputs": {
+          "out": "/nix/store/w5nb9anqvbbd5jjl15w0ql1kk1zwiypg-amber-core-store-check-0.1.0"
+        },
+        "startTime": 1789092069,
+        "stopTime": 1789092095
+      }
+    ],
+    "log": "/home/forge-dev-builds/91bf04af-d6b3-4c5c-9f0c-b1f6b17f9100/build.log"
+  },
+  "source": "/nix/store/qnc60sycpvllmxvalk02k06aklqcy4y6-source",
+  "module_sha256": "0e7a53b3d7eb0d3294f4b2d87f950e8ff985b54787f9871859bb6e25a510fd11",
+  "exports_sha256": "5faa4aa62523c254f37cd9666e59e25b4743313d1ae6dc463af8663cff16a382",
+  "tests": [
+    "amber-core-store-check> test result: ok. 470 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.33s"
+  ],
+  "code_sha256": "67df4241aa856fd4f62535ed23aecf2c1eceb908078d5d6e6b3059dfdca9604d",
+  "final_module_sha256": "c6d345e91e2cee65f54a49016388a39741df7b4aa72abe39fc4ed57528457263",
+  "post_gate_change": "Public concurrency documentation only",
+  "invocation": "166a1396b1794630b9356a66b21d5d73"
+}
