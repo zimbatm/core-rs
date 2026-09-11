@@ -72,6 +72,18 @@
             ];
             installPhase = "mkdir -p $out";
           };
+          closure-membership-bench = pkgs.rustPlatform.buildRustPackage {
+            pname = "amber-core-closure-membership-bench";
+            version = "0.1.0";
+            src = self;
+            cargoLock.lockFile = ./Cargo.lock;
+            cargoBuildFlags = [
+              "--example"
+              "closure-membership-profile"
+            ];
+            doCheck = false;
+            installPhase = "install -Dm755 target/${pkgs.stdenv.hostPlatform.rust.rustcTarget}/release/examples/closure-membership-profile $out/bin/closure-membership-profile";
+          };
           file-node-bench = pkgs.rustPlatform.buildRustPackage {
             pname = "amber-core-file-node-bench";
             version = "0.1.0";
